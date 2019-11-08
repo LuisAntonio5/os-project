@@ -1,5 +1,5 @@
-//gcc main.c -lpthread -D_REENTRANT -Wall -o ex
-//ps -ef | grep ex
+//gcc main.c -lpthread -D_REENTRANT -Wall -o projeto
+//ps -ef | grep projeto
 //ipcs
 #include <stdlib.h>
 #include <stdio.h>
@@ -15,12 +15,15 @@
 #include <sys/types.h>
 #include "string.h"
 #include <signal.h>
+#include <semaphore.h>
 
 #define PIPE_NAME "my_pipe"
 #define LOG_NAME "log.txt"
 #define DEBUG
 #define BUFFER_LENGTH 100
 #define TIME_NOW_LENGTH 9
+#define CONFIG_FILE_NAME "config.txt"
+#define FLIGHT_CODE_MAX_LENGTH 15
 
 
 //HEADER FILE
@@ -50,6 +53,29 @@ typedef struct{
 } mem_structure;
 mem_structure* shared_memory;
 
+typedef struct ll_threads* ptr_ll_threads;
+typedef struct ll_threads{
+  pthread_t this_thread;
+  ptr_ll_threads next;
+}Ll_threads;
+
+typedef struct ll_departures_to_create* ptr_ll_departures_to_create;
+typedef struct ll_departures_to_create{
+  char flight_code[FLIGHT_CODE_MAX_LENGTH];
+  int init;
+  int takeoff;
+  ptr_ll_departures_to_create next;
+}Ll_departures_to_create;
+
+typedef struct ll_arrivals_to_create* ptr_ll_arrivals_to_create;
+typedef struct ll_arrivals_to_create{
+  char flight_code[FLIGHT_CODE_MAX_LENGTH];
+  int init;
+  int eta;
+  int fuel;
+  ptr_ll_arrivals_to_create next;
+}Ll_arrivals_to_create;
+
 void init_shared_memory();
 void read_config();
 void sim_manager();
@@ -57,22 +83,51 @@ void *pipe_worker();
 int validate_command(char* command);
 int check_only_numbers(char* str);
 void get_current_time_to_string(char* return_string);
-//MDUAR FICHEIRO
-void control_tower(){
-  exit(0);
-}
+ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread);
+void control_tower();
+ptr_ll_departures_to_create sorted_insert_departures(ptr_ll_departures_to_create list, ptr_ll_departures_to_create new);
+ptr_ll_arrivals_to_create sorted_insert_arrivals(ptr_ll_arrivals_to_create list, ptr_ll_arrivals_to_create new);
+void * time_worker();
 
 //GLOBAL VARIABLES
 //struct timeval now;
 Config_options options;
+//linked lists
+ptr_ll_threads thread_list = NULL;
+ptr_ll_departures_to_create departures_list = NULL;
+ptr_ll_arrivals_to_create arrivals_list = NULL;
 int shmid;
 int fd;
+int time_counter;
 FILE* log_fich;
 
+// semaphores
+sem_t* write_log;
+pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
+
+
 void sigint(int num){
-  fclose(log_fich);
-  printf("\n");
+  #ifdef DEBUG
+  ptr_ll_departures_to_create aux = departures_list;
+  while (aux != NULL) {
+    printf("%s %d\n", aux->flight_code, aux->init);
+    aux = aux->next;
+  }
+  ptr_ll_arrivals_to_create aa = arrivals_list;
+  while (aa != NULL) {
+    printf("%s %d\n", aa->flight_code, aa->init);
+    aa = aa->next;
+  }
+  printf("\n\n\n");
+  ptr_ll_threads bbb = thread_list;
+  while (bbb != NULL) {
+    printf("%ld \n", bbb->this_thread);
+    bbb = bbb->next;
+  }
+  #endif
   exit(0);
+
+
 }
 
 int main(void){
@@ -83,7 +138,7 @@ int main(void){
   //   printf("%ld\n", now.tv_usec);
   //   sleep(1);
   // }
-  signal(SIGINT,sigint);
+
   //create pipe
   unlink(PIPE_NAME);
   if(mkfifo(PIPE_NAME, O_CREAT|0600)<0){
@@ -92,6 +147,17 @@ int main(void){
   #ifdef DEBUG
   printf("Pipe created\n");
   #endif
+
+  //clear log.txt
+  log_fich = fopen(LOG_NAME, "w");
+  fclose(log_fich);
+  if(log_fich == NULL){
+    printf("Error opening %s", LOG_NAME);
+  }
+  #ifdef DEBUG
+  printf("log.txt cleared\n");
+  #endif
+
 
   //CREATE SHARED MEMORY
   shmid = shmget(IPC_PRIVATE,sizeof(int),IPC_CREAT | 0766);
@@ -108,6 +174,10 @@ int main(void){
   #ifdef DEBUG
   printf("Shared memory initialized\n");
   #endif
+  //semaphore to write on log.txt
+
+  sem_unlink("SEM_LOG");
+  write_log = sem_open("SEM_LOG", O_CREAT|O_EXCL, 0700, 1);
   //create control tower process
   if(fork() == 0){
     control_tower();
@@ -122,9 +192,23 @@ int main(void){
 }
 
 void sim_manager(){
-  pthread_t input_thread;
-  pthread_create(&input_thread,NULL,pipe_worker,&input_thread);
-  pthread_join(input_thread,NULL);
+  pthread_t new_thread;
+  signal(SIGINT,sigint);
+  // create thread to manage pipe input
+  if (pthread_create(&new_thread,NULL,pipe_worker, NULL)){
+    printf("error creating thread\n");
+    exit(-1);
+  }
+  thread_list = insert_thread(thread_list, new_thread);
+
+  // create thread to manage time
+  if (pthread_create(&new_thread,NULL,time_worker, NULL)){
+    printf("error creating thread\n");
+    exit(-1);
+  }
+  thread_list = insert_thread(thread_list, new_thread);
+  // fix
+  pthread_join(thread_list->this_thread,NULL);
 }
 
 //ESCREVER NO LOG E VERIFICAR ERROS
@@ -133,10 +217,7 @@ void *pipe_worker(){
   char time_string[TIME_NOW_LENGTH];
 
   fd = open(PIPE_NAME,O_RDWR);
-  log_fich = fopen(LOG_NAME,"w");
-  if(log_fich < 0){
-    printf("Error creating %s", LOG_NAME);
-  }
+
   while(1){
     read(fd,buffer,sizeof(buffer));
     #ifdef DEBUG
@@ -144,16 +225,32 @@ void *pipe_worker(){
     #endif
     buffer[strlen(buffer)-1] = '\0';
     if(validate_command(buffer)){
+      sem_wait(write_log);
+      log_fich = fopen(LOG_NAME,"a");
+      if(log_fich == NULL){
+        printf("Error opening %s", LOG_NAME);
+      }
       //GET CURRENT TIME
       get_current_time_to_string(time_string);
       printf("%s NEW COMMAND => %s\n",time_string, buffer);
       fprintf(log_fich, "%s NEW COMMAND => %s\n",time_string,buffer);
+      fclose(log_fich);
+      sem_post(write_log);
     }
     else{
+      //GET CURRENT TIME
+
+      sem_wait(write_log);
+      log_fich = fopen(LOG_NAME,"a");
+      if(log_fich == NULL){
+        printf("Error opening %s", LOG_NAME);
+      }
       //GET CURRENT TIME
       get_current_time_to_string(time_string);
       printf("%s WRONG COMMAND => %s\n",time_string, buffer);
       fprintf(log_fich, "%s WRONG COMMAND => %s\n",time_string ,buffer);
+      fclose(log_fich);
+      sem_post(write_log);
     }
 
     //clearing buffer after each command -> avoids problems
@@ -164,6 +261,25 @@ void *pipe_worker(){
 
 }
 
+void * time_worker(){
+  //initialize time counter
+  time_counter = 0;
+  while(1){
+    time_counter++;
+    printf("%d\n", time_counter);
+    usleep(options.ut * 1000);
+    // if((departures_list == NULL && arrivals_list == NULL) || (departures_list->init != time_counter && arrivals_list == NULL) || (arrivals_list->init != time_counter && departures_list == NULL) || (arrivals_list->init != time_counter && departures_list->init != time_counter)){
+    //   printf("ola\n");
+    // }
+    if (arrivals_list != NULL && arrivals_list->init == time_counter) {
+      printf("ola\n");
+    }
+    else if (departures_list != NULL && departures_list->init == time_counter) {
+      printf("ola\n");
+    }
+  }
+}
+
 int validate_command(char* command){
   //Validate commands and split command by " " for thread data creation
   int i = 0;
@@ -171,6 +287,8 @@ int validate_command(char* command){
   char aux[BUFFER_LENGTH];
   char** split_command;
   int init_time,takeoff,eta,fuel;
+  ptr_ll_departures_to_create new_departure;
+  ptr_ll_arrivals_to_create new_arrival;
   strcpy(aux,command);
   split_command = (char**)calloc(1,sizeof(char*));
   token = strtok(aux," ");
@@ -192,7 +310,15 @@ int validate_command(char* command){
     else{
       //Reach here if everything is OK
       init_time = atoi(split_command[3]);
+      // todo : validate init time!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       takeoff = atoi(split_command[5]);
+      new_departure = (ptr_ll_departures_to_create) malloc(sizeof(Ll_departures_to_create));
+      strcpy(new_departure->flight_code,split_command[1]);
+      new_departure->init = init_time;
+      new_departure->takeoff= takeoff;
+      new_departure->next = NULL;
+      printf("%s %d %d\n", new_departure->flight_code, new_departure->init, new_departure->takeoff);
+      departures_list = sorted_insert_departures(departures_list, new_departure);
       return 1;
     }
   }
@@ -207,8 +333,22 @@ int validate_command(char* command){
     else{
       //Reach here if everything is OK
       init_time = atoi(split_command[3]);
-      takeoff = atoi(split_command[5]);
-      printf("VALIDO\n");
+      eta = atoi(split_command[5]);
+      fuel = atoi(split_command[7]);
+      if (eta > fuel) {
+        #ifdef DEBUG
+        printf("INVALID COMMAND, NOT ENOUGH FUEL\n");
+        #endif
+        return 0;
+      }
+      new_arrival = (ptr_ll_arrivals_to_create) malloc(sizeof(Ll_arrivals_to_create));
+      strcpy(new_arrival->flight_code,split_command[1]);
+      new_arrival->init = init_time;
+      new_arrival->eta = eta;
+      new_arrival->fuel = fuel;
+      new_arrival->next = NULL;
+      printf("%s %d %d\n", new_arrival->flight_code, new_arrival->init, new_arrival->fuel);
+      arrivals_list = sorted_insert_arrivals(arrivals_list, new_arrival);
       return 1;
     }
   }
@@ -234,7 +374,7 @@ int check_only_numbers(char* str){
 void read_config(Config_options* Ptr_options){
   FILE* f;
   char temp[15];
-  f = fopen("./config.txt","r");
+  f = fopen(CONFIG_FILE_NAME,"r");
   if(f==NULL){
     printf("Error opening config.txt\n");
     exit(-1);
@@ -281,4 +421,85 @@ void init_shared_memory(){
   shared_memory->stats.avg_emergency_holdings = 0;
   shared_memory->stats.redirected_flights = 0;
   shared_memory->stats.num_rejected = 0;
+}
+
+ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
+  ptr_ll_threads new = (ptr_ll_threads) malloc(sizeof(Ll_threads));
+  new->this_thread = new_thread;
+  if (list == NULL) {
+    new->next = NULL;
+  }
+  else{
+    new->next = list;
+  }
+  return new;
+}
+
+//MDUAR FICHEIRO
+void control_tower(){
+  char time_string[TIME_NOW_LENGTH];
+  sem_wait(write_log);
+  log_fich = fopen(LOG_NAME,"a");
+  if(log_fich == NULL){
+    printf("Error opening %s", LOG_NAME);
+  }
+  //GET CURRENT TIME
+  get_current_time_to_string(time_string);
+  printf("%s Created process: %d and %d\n", time_string, getppid(), getpid());
+  fprintf(log_fich, "%s Created process: %d and %d\n", time_string, getppid(), getpid());
+  fclose(log_fich);
+  sem_post(write_log);
+  exit(0);
+}
+
+ptr_ll_departures_to_create sorted_insert_departures(ptr_ll_departures_to_create list, ptr_ll_departures_to_create new){
+  ptr_ll_departures_to_create current = list, ant = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      if (new->init <= current->init) {
+        if (ant == NULL) {
+          new->next = current;
+          return new;
+        }
+        else{
+          ant->next = new;
+          new->next = current;
+          return list;
+        }
+      }
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
+}
+
+ptr_ll_arrivals_to_create sorted_insert_arrivals(ptr_ll_arrivals_to_create list, ptr_ll_arrivals_to_create new){
+  ptr_ll_arrivals_to_create current = list, ant = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      if (new->init <= current->init) {
+        if (ant == NULL) {
+          new->next = current;
+          return new;
+        }
+        else{
+          ant->next = new;
+          new->next = current;
+          return list;
+        }
+      }
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
 }
