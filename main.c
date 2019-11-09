@@ -79,7 +79,6 @@ typedef struct ll_arrivals_to_create{
 void init_shared_memory();
 void read_config();
 void sim_manager();
-void *pipe_worker();
 int validate_command(char* command);
 int check_only_numbers(char* str);
 void get_current_time_to_string(char* return_string);
@@ -87,7 +86,11 @@ ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread);
 void control_tower();
 ptr_ll_departures_to_create sorted_insert_departures(ptr_ll_departures_to_create list, ptr_ll_departures_to_create new);
 ptr_ll_arrivals_to_create sorted_insert_arrivals(ptr_ll_arrivals_to_create list, ptr_ll_arrivals_to_create new);
-void * time_worker();
+void *pipe_worker();
+void *time_worker();
+void *departure_worker();
+void* arrival_worker();
+ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id);
 
 //GLOBAL VARIABLES
 //struct timeval now;
@@ -104,7 +107,8 @@ FILE* log_fich;
 // semaphores
 sem_t* write_log;
 pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
-
+pthread_mutex_t mutex_ll_create_departures = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
 
 void sigint(int num){
   #ifdef DEBUG
@@ -199,17 +203,25 @@ void sim_manager(){
     printf("error creating thread\n");
     exit(-1);
   }
+
+  pthread_mutex_lock(&mutex_ll_threads);
   thread_list = insert_thread(thread_list, new_thread);
+  pthread_mutex_unlock(&mutex_ll_threads);
 
   // create thread to manage time
   if (pthread_create(&new_thread,NULL,time_worker, NULL)){
     printf("error creating thread\n");
     exit(-1);
   }
+
+  pthread_mutex_lock(&mutex_ll_threads);
   thread_list = insert_thread(thread_list, new_thread);
-  // fix
+  pthread_mutex_unlock(&mutex_ll_threads);
+
+  // fix este join
   pthread_join(thread_list->this_thread,NULL);
 }
+
 
 //ESCREVER NO LOG E VERIFICAR ERROS
 void *pipe_worker(){
@@ -263,19 +275,70 @@ void *pipe_worker(){
 
 void * time_worker(){
   //initialize time counter
+  ptr_ll_arrivals_to_create currentArrival;
+  ptr_ll_threads aux;
+  ptr_ll_departures_to_create currentDepartures;
+  pthread_t new_thread;
   time_counter = 0;
   while(1){
     time_counter++;
-    printf("%d\n", time_counter);
+    //printf("%d\n", time_counter);
+    //counting time in milliseconds
     usleep(options.ut * 1000);
-    // if((departures_list == NULL && arrivals_list == NULL) || (departures_list->init != time_counter && arrivals_list == NULL) || (arrivals_list->init != time_counter && departures_list == NULL) || (arrivals_list->init != time_counter && departures_list->init != time_counter)){
-    //   printf("ola\n");
-    // }
+
     if (arrivals_list != NULL && arrivals_list->init == time_counter) {
-      printf("ola\n");
+      //time to create at least one arrival
+      currentArrival = arrivals_list;
+      printf("a\n");
+      while(currentArrival && currentArrival->init == time_counter){
+        if (pthread_create(&new_thread,NULL,arrival_worker, currentArrival->flight_code)){
+          printf("error creating thread\n");
+          exit(-1);
+        }
+
+        pthread_mutex_lock(&mutex_ll_create_arrivals);
+        pthread_mutex_lock(&mutex_ll_threads);
+        thread_list = insert_thread(thread_list, new_thread);
+        arrivals_list = currentArrival->next;
+        currentArrival = arrivals_list;
+        pthread_mutex_unlock(&mutex_ll_threads);
+        pthread_mutex_unlock(&mutex_ll_create_arrivals);
+
+        //print da lista das thread_list
+        aux= thread_list;
+        while(aux){
+          printf("%ld\n", aux->this_thread);
+          aux=aux->next;
+        }
+      }
     }
-    else if (departures_list != NULL && departures_list->init == time_counter) {
-      printf("ola\n");
+
+    if (departures_list != NULL && departures_list->init == time_counter) {
+      //time to create at least one departure
+      currentDepartures = departures_list;
+      printf("a\n");
+      while(currentDepartures && currentDepartures->init == time_counter){
+        if (pthread_create(&new_thread,NULL,departure_worker, currentDepartures->flight_code)){
+          printf("error creating thread\n");
+          exit(-1);
+        }
+
+        pthread_mutex_lock(&mutex_ll_create_departures);
+        pthread_mutex_lock(&mutex_ll_threads);
+        thread_list = insert_thread(thread_list, new_thread);
+        departures_list = currentDepartures->next;
+        // free(currentDepartures);
+        currentDepartures = departures_list;
+        pthread_mutex_unlock(&mutex_ll_threads);
+        pthread_mutex_unlock(&mutex_ll_create_departures);
+
+        //print da lista das thread_list
+        aux= thread_list;
+        while(aux){
+          printf("%ld\n", aux->this_thread);
+          aux=aux->next;
+        }
+      }
     }
   }
 }
@@ -318,7 +381,11 @@ int validate_command(char* command){
       new_departure->takeoff= takeoff;
       new_departure->next = NULL;
       printf("%s %d %d\n", new_departure->flight_code, new_departure->init, new_departure->takeoff);
+
+      pthread_mutex_lock(&mutex_ll_create_departures);
       departures_list = sorted_insert_departures(departures_list, new_departure);
+      pthread_mutex_unlock(&mutex_ll_create_departures);
+
       return 1;
     }
   }
@@ -331,7 +398,6 @@ int validate_command(char* command){
       return 0;
     }
     else{
-      //Reach here if everything is OK
       init_time = atoi(split_command[3]);
       eta = atoi(split_command[5]);
       fuel = atoi(split_command[7]);
@@ -341,6 +407,7 @@ int validate_command(char* command){
         #endif
         return 0;
       }
+      //Reach here if everything is OK
       new_arrival = (ptr_ll_arrivals_to_create) malloc(sizeof(Ll_arrivals_to_create));
       strcpy(new_arrival->flight_code,split_command[1]);
       new_arrival->init = init_time;
@@ -348,7 +415,11 @@ int validate_command(char* command){
       new_arrival->fuel = fuel;
       new_arrival->next = NULL;
       printf("%s %d %d\n", new_arrival->flight_code, new_arrival->init, new_arrival->fuel);
+
+      pthread_mutex_lock(&mutex_ll_create_arrivals);
       arrivals_list = sorted_insert_arrivals(arrivals_list, new_arrival);
+      pthread_mutex_unlock(&mutex_ll_create_arrivals);
+
       return 1;
     }
   }
@@ -502,4 +573,106 @@ ptr_ll_arrivals_to_create sorted_insert_arrivals(ptr_ll_arrivals_to_create list,
     ant->next = new;
     return list;
   }
+}
+
+void* departure_worker(void* ptr_ll_departure){
+  Ll_departures_to_create flight_info = *((ptr_ll_departures_to_create)ptr_ll_departure);
+  char time_string[TIME_NOW_LENGTH];
+
+  sem_wait(write_log);
+  log_fich = fopen(LOG_NAME,"a");
+  if(log_fich == NULL){
+    printf("Error opening %s", LOG_NAME);
+  }
+  //GET CURRENT TIME
+  get_current_time_to_string(time_string);
+  fprintf(log_fich,"%s DEPARTURE %s CREATED\n",time_string,flight_info.flight_code);
+  printf("%s DEPARTURE %s CREATED\n",time_string,flight_info.flight_code);
+  fclose(log_fich);
+  sem_post(write_log);
+
+  // FALTA FAZER CONTROLO DE PISTAS
+  usleep(1000 * flight_info.takeoff);
+
+  sem_wait(write_log);
+  log_fich = fopen(LOG_NAME,"a");
+  if(log_fich == NULL){
+    printf("Error opening %s", LOG_NAME);
+  }
+  //GET CURRENT TIME
+  get_current_time_to_string(time_string);
+  fprintf(log_fich,"%s DEPARTURE %s CONCLUDED\n",time_string,flight_info.flight_code);
+  printf("DEPARTURE %s CONCLUDED\n",flight_info.flight_code);
+  fclose(log_fich);
+  sem_post(write_log);
+
+  pthread_mutex_lock(&mutex_ll_threads);
+  thread_list = remove_thread_from_ll(thread_list,pthread_self());
+  free(ptr_ll_departure);
+  pthread_mutex_unlock(&mutex_ll_threads);
+
+  pthread_exit(NULL);
+}
+
+void* arrival_worker(void* ptr_ll_arrival){
+  Ll_arrivals_to_create flight_info = *((ptr_ll_arrivals_to_create)ptr_ll_arrival);
+  char time_string[TIME_NOW_LENGTH];
+
+  sem_wait(write_log);
+  log_fich = fopen(LOG_NAME,"a");
+  if(log_fich == NULL){
+    printf("Error opening %s", LOG_NAME);
+  }
+  //GET CURRENT TIME
+  get_current_time_to_string(time_string);
+  fprintf(log_fich, "%s ARRIVAL %s CREATED\n",time_string,flight_info.flight_code);
+  printf("%s ARRIVAL %s CREATED\n",time_string,flight_info.flight_code);
+  fclose(log_fich);
+  sem_post(write_log);
+
+  // FALTA FAZER CONTROLO DE PISTAS
+  usleep(1000 * flight_info.eta);
+
+  sem_wait(write_log);
+  log_fich = fopen(LOG_NAME,"a");
+  if(log_fich == NULL){
+    printf("Error opening %s", LOG_NAME);
+  }
+  //GET CURRENT TIME
+  get_current_time_to_string(time_string);
+  fprintf(log_fich,"%s ARRIVAL %s CONCLUDED\n",time_string,flight_info.flight_code);
+  printf("ARRIVAL %s CONCLUDED\n",flight_info.flight_code);
+  fclose(log_fich);
+  sem_post(write_log);
+
+  pthread_mutex_lock(&mutex_ll_threads);
+  thread_list = remove_thread_from_ll(thread_list,pthread_self());
+  free(ptr_ll_arrival);
+  pthread_mutex_unlock(&mutex_ll_threads);
+
+  pthread_exit(NULL);
+}
+
+ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id){
+  ptr_ll_threads current,aux,ant;
+  current = list;
+  while(current){
+    if(current->this_thread == thread_id){
+      if(ant==NULL){
+        aux = current->next;
+        free(current);
+        return aux;
+      }
+      else{
+        ant->next = current->next;
+        free(current);
+        return list;
+      }
+    }
+    else{
+      ant = current;
+      current = current->next;
+    }
+  }
+  return list;
 }
