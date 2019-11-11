@@ -16,6 +16,7 @@
 #include "string.h"
 #include <signal.h>
 #include <semaphore.h>
+#include <sys/msg.h>
 
 #define PIPE_NAME "my_pipe"
 #define LOG_NAME "log.txt"
@@ -50,6 +51,7 @@ typedef struct stats{
 
 typedef struct{
   Stats stats;
+  int* flight_slots;
 } mem_structure;
 mem_structure* shared_memory;
 
@@ -91,9 +93,9 @@ void *time_worker();
 void *departure_worker();
 void* arrival_worker();
 ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id);
+void cleanup();
 
 //GLOBAL VARIABLES
-//struct timeval now;
 Config_options options;
 //linked lists
 ptr_ll_threads thread_list = NULL;
@@ -101,14 +103,26 @@ ptr_ll_departures_to_create departures_list = NULL;
 ptr_ll_arrivals_to_create arrivals_list = NULL;
 int shmid;
 int fd;
+int msq_id;
 int time_counter;
+int atm_departures = 0;
+int atm_arrivals = 0;
 FILE* log_fich;
 
 // semaphores
-sem_t* write_log;
+sem_t* sem_write_log;
+sem_t* sem_shared_stats;
+sem_t* sem_shared_flight_slots;
+sem_t* sem_manage_flights; // if 0 means that there is no flight to manage
 pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_atm_departures = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_atm_arrivals = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_time_counter = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_cond = PTHREAD_MUTEX_INITIALIZER;
+// cond variables
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 void sigint(int num){
   #ifdef DEBUG
@@ -129,6 +143,7 @@ void sigint(int num){
     bbb = bbb->next;
   }
   #endif
+  cleanup();
   exit(0);
 
 
@@ -154,10 +169,10 @@ int main(void){
 
   //clear log.txt
   log_fich = fopen(LOG_NAME, "w");
-  fclose(log_fich);
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
   }
+  fclose(log_fich);
   #ifdef DEBUG
   printf("log.txt cleared\n");
   #endif
@@ -173,15 +188,23 @@ int main(void){
   #ifdef DEBUG
   printf("Shared memory created\n");
   #endif
+  //CREATE MESSAGE QUEUE
+  if((msq_id = msgget(IPC_PRIVATE, IPC_CREAT|0700)) != -1 ){
+    #ifdef DEBUG
+    printf("MESSAGE QUEUE CREATED\n");
+    #endif
+  }
   //INIT SHARED MEMORY
   init_shared_memory();
   #ifdef DEBUG
   printf("Shared memory initialized\n");
   #endif
   //semaphore to write on log.txt
-
   sem_unlink("SEM_LOG");
-  write_log = sem_open("SEM_LOG", O_CREAT|O_EXCL, 0700, 1);
+  sem_write_log = sem_open("SEM_LOG", O_CREAT|O_EXCL, 0700, 1);
+  //semaphore to write on shared mem
+  sem_unlink("sem_shared_stats");
+  sem_shared_stats = sem_open("sem_shared_stats", O_CREAT|O_EXCL, 0700, 1);
   //create control tower process
   if(fork() == 0){
     control_tower();
@@ -189,9 +212,7 @@ int main(void){
   else{
     sim_manager();
   }
-  //CLEAN SHARED MEMORY
-  shmdt(shared_memory);
-	shmctl(shmid, IPC_RMID,NULL);
+
   return 0;
 }
 
@@ -218,8 +239,8 @@ void sim_manager(){
   thread_list = insert_thread(thread_list, new_thread);
   pthread_mutex_unlock(&mutex_ll_threads);
 
-  // fix este join
-  pthread_join(thread_list->this_thread,NULL);
+  // fix este join, funciona só para nao acabar o programa
+  pthread_join(new_thread,NULL);
 }
 
 
@@ -229,7 +250,7 @@ void *pipe_worker(){
   char time_string[TIME_NOW_LENGTH];
 
   fd = open(PIPE_NAME,O_RDWR);
-
+  printf("%d\n", options.max_takeoffs);
   while(1){
     read(fd,buffer,sizeof(buffer));
     #ifdef DEBUG
@@ -237,7 +258,7 @@ void *pipe_worker(){
     #endif
     buffer[strlen(buffer)-1] = '\0';
     if(validate_command(buffer)){
-      sem_wait(write_log);
+      sem_wait(sem_write_log);
       log_fich = fopen(LOG_NAME,"a");
       if(log_fich == NULL){
         printf("Error opening %s", LOG_NAME);
@@ -247,12 +268,12 @@ void *pipe_worker(){
       printf("%s NEW COMMAND => %s\n",time_string, buffer);
       fprintf(log_fich, "%s NEW COMMAND => %s\n",time_string,buffer);
       fclose(log_fich);
-      sem_post(write_log);
+      sem_post(sem_write_log);
     }
     else{
       //GET CURRENT TIME
 
-      sem_wait(write_log);
+      sem_wait(sem_write_log);
       log_fich = fopen(LOG_NAME,"a");
       if(log_fich == NULL){
         printf("Error opening %s", LOG_NAME);
@@ -262,7 +283,7 @@ void *pipe_worker(){
       printf("%s WRONG COMMAND => %s\n",time_string, buffer);
       fprintf(log_fich, "%s WRONG COMMAND => %s\n",time_string ,buffer);
       fclose(log_fich);
-      sem_post(write_log);
+      sem_post(sem_write_log);
     }
 
     //clearing buffer after each command -> avoids problems
@@ -281,7 +302,9 @@ void * time_worker(){
   pthread_t new_thread;
   time_counter = 0;
   while(1){
+    pthread_mutex_lock(&mutex_time_counter);
     time_counter++;
+    pthread_mutex_unlock(&mutex_time_counter);
     //printf("%d\n", time_counter);
     //counting time in milliseconds
     usleep(options.ut * 1000);
@@ -374,6 +397,14 @@ int validate_command(char* command){
       //Reach here if everything is OK
       init_time = atoi(split_command[3]);
       // todo : validate init time!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+      pthread_mutex_lock(&mutex_time_counter);
+      if(init_time<time_counter || atm_departures == options.max_takeoffs){
+        #ifdef DEBUG
+        printf("INVALID COMMAND\n");
+        #endif
+        return 0;
+      }
+      pthread_mutex_unlock(&mutex_time_counter);
       takeoff = atoi(split_command[5]);
       new_departure = (ptr_ll_departures_to_create) malloc(sizeof(Ll_departures_to_create));
       strcpy(new_departure->flight_code,split_command[1]);
@@ -381,7 +412,9 @@ int validate_command(char* command){
       new_departure->takeoff= takeoff;
       new_departure->next = NULL;
       printf("%s %d %d\n", new_departure->flight_code, new_departure->init, new_departure->takeoff);
-
+      pthread_mutex_lock(&mutex_atm_departures);
+      atm_departures++;
+      pthread_mutex_unlock(&mutex_atm_departures);
       pthread_mutex_lock(&mutex_ll_create_departures);
       departures_list = sorted_insert_departures(departures_list, new_departure);
       pthread_mutex_unlock(&mutex_ll_create_departures);
@@ -401,12 +434,14 @@ int validate_command(char* command){
       init_time = atoi(split_command[3]);
       eta = atoi(split_command[5]);
       fuel = atoi(split_command[7]);
-      if (eta > fuel) {
+      pthread_mutex_lock(&mutex_time_counter);
+      if (eta > fuel || init_time<time_counter || atm_arrivals == options.max_landings ) {
         #ifdef DEBUG
-        printf("INVALID COMMAND, NOT ENOUGH FUEL\n");
+        printf("INVALID COMMAND\n");
         #endif
         return 0;
       }
+      pthread_mutex_unlock(&mutex_time_counter);
       //Reach here if everything is OK
       new_arrival = (ptr_ll_arrivals_to_create) malloc(sizeof(Ll_arrivals_to_create));
       strcpy(new_arrival->flight_code,split_command[1]);
@@ -416,6 +451,9 @@ int validate_command(char* command){
       new_arrival->next = NULL;
       printf("%s %d %d\n", new_arrival->flight_code, new_arrival->init, new_arrival->fuel);
 
+      pthread_mutex_lock(&mutex_atm_arrivals);
+      atm_arrivals++;
+      pthread_mutex_unlock(&mutex_atm_arrivals);
       pthread_mutex_lock(&mutex_ll_create_arrivals);
       arrivals_list = sorted_insert_arrivals(arrivals_list, new_arrival);
       pthread_mutex_unlock(&mutex_ll_create_arrivals);
@@ -492,6 +530,7 @@ void init_shared_memory(){
   shared_memory->stats.avg_emergency_holdings = 0;
   shared_memory->stats.redirected_flights = 0;
   shared_memory->stats.num_rejected = 0;
+  shared_memory->flight_slots = (int*)calloc(options.max_landings + options.max_takeoffs,sizeof(int));
 }
 
 ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
@@ -509,7 +548,7 @@ ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
 //MDUAR FICHEIRO
 void control_tower(){
   char time_string[TIME_NOW_LENGTH];
-  sem_wait(write_log);
+  sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
@@ -519,7 +558,7 @@ void control_tower(){
   printf("%s Created process: %d and %d\n", time_string, getppid(), getpid());
   fprintf(log_fich, "%s Created process: %d and %d\n", time_string, getppid(), getpid());
   fclose(log_fich);
-  sem_post(write_log);
+  sem_post(sem_write_log);
   exit(0);
 }
 
@@ -579,7 +618,7 @@ void* departure_worker(void* ptr_ll_departure){
   Ll_departures_to_create flight_info = *((ptr_ll_departures_to_create)ptr_ll_departure);
   char time_string[TIME_NOW_LENGTH];
 
-  sem_wait(write_log);
+  sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
@@ -589,12 +628,12 @@ void* departure_worker(void* ptr_ll_departure){
   fprintf(log_fich,"%s DEPARTURE %s CREATED\n",time_string,flight_info.flight_code);
   printf("%s DEPARTURE %s CREATED\n",time_string,flight_info.flight_code);
   fclose(log_fich);
-  sem_post(write_log);
+  sem_post(sem_write_log);
 
-  // FALTA FAZER CONTROLO DE PISTAS
+  // FALTA FAZER CONTROLO DE PISTAS 2 META
   usleep(1000 * flight_info.takeoff);
 
-  sem_wait(write_log);
+  sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
@@ -604,8 +643,11 @@ void* departure_worker(void* ptr_ll_departure){
   fprintf(log_fich,"%s DEPARTURE %s CONCLUDED\n",time_string,flight_info.flight_code);
   printf("DEPARTURE %s CONCLUDED\n",flight_info.flight_code);
   fclose(log_fich);
-  sem_post(write_log);
+  sem_post(sem_write_log);
 
+  pthread_mutex_lock(&mutex_atm_departures);
+  atm_departures--;
+  pthread_mutex_unlock(&mutex_atm_departures);
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = remove_thread_from_ll(thread_list,pthread_self());
   free(ptr_ll_departure);
@@ -618,7 +660,7 @@ void* arrival_worker(void* ptr_ll_arrival){
   Ll_arrivals_to_create flight_info = *((ptr_ll_arrivals_to_create)ptr_ll_arrival);
   char time_string[TIME_NOW_LENGTH];
 
-  sem_wait(write_log);
+  sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
@@ -628,12 +670,12 @@ void* arrival_worker(void* ptr_ll_arrival){
   fprintf(log_fich, "%s ARRIVAL %s CREATED\n",time_string,flight_info.flight_code);
   printf("%s ARRIVAL %s CREATED\n",time_string,flight_info.flight_code);
   fclose(log_fich);
-  sem_post(write_log);
+  sem_post(sem_write_log);
 
   // FALTA FAZER CONTROLO DE PISTAS
   usleep(1000 * flight_info.eta);
 
-  sem_wait(write_log);
+  sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
@@ -643,8 +685,11 @@ void* arrival_worker(void* ptr_ll_arrival){
   fprintf(log_fich,"%s ARRIVAL %s CONCLUDED\n",time_string,flight_info.flight_code);
   printf("ARRIVAL %s CONCLUDED\n",flight_info.flight_code);
   fclose(log_fich);
-  sem_post(write_log);
+  sem_post(sem_write_log);
 
+  pthread_mutex_lock(&mutex_atm_arrivals);
+  atm_arrivals--;
+  pthread_mutex_unlock(&mutex_atm_arrivals);
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = remove_thread_from_ll(thread_list,pthread_self());
   free(ptr_ll_arrival);
@@ -675,4 +720,18 @@ ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id){
     }
   }
   return list;
+}
+
+void cleanup(){
+  //CLEAN SHARED MEMORY
+  shmdt(shared_memory);
+	shmctl(shmid, IPC_RMID,NULL);
+  //DESTROY SEMAPHROE
+  sem_destroy(sem_write_log);
+  sem_destroy(sem_shared_stats);
+  pthread_mutex_destroy(&mutex_ll_threads);
+  pthread_mutex_destroy(&mutex_ll_create_arrivals);
+  pthread_mutex_destroy(&mutex_ll_create_departures);
+  //CLEAN MSG QUEUE
+  msgctl(msq_id, IPC_RMID, NULL);
 }
