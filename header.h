@@ -17,12 +17,14 @@
 
 #define PIPE_NAME "my_pipe"
 #define LOG_NAME "log.txt"
-#define DEBUG
+// #define DEBUG
 #define BUFFER_LENGTH 100
 #define TIME_NOW_LENGTH 9
 #define CONFIG_FILE_NAME "config.txt"
 #define FLIGHT_CODE_MAX_LENGTH 15
-
+#define DEBUG
+#define UNUSED_SLOT 0
+#define WAITING_ORDERS 1
 
 //HEADER FILE
 typedef struct config_options {
@@ -48,7 +50,8 @@ typedef struct stats{
 
 typedef struct{
   Stats stats;
-  int* flight_slots;
+  int flight_slots[100];
+  //PROBLEMA: RESOLVER ISTO
 } mem_structure;
 mem_structure* shared_memory;
 
@@ -75,6 +78,37 @@ typedef struct ll_arrivals_to_create{
   ptr_ll_arrivals_to_create next;
 }Ll_arrivals_to_create;
 
+//struct for messageQ
+typedef struct message_struct{
+  long msgtype; //2 for non-urgent 1 for urgent
+  char type; //a for arrival d for departure
+  int takeoff;
+  int fuel;
+  int eta;
+  int type_rcv;
+} message;
+
+typedef struct message_slot{
+  long msgtype;
+  int slot;
+} message_give_slot;
+
+typedef struct queue_to_arrive* ptr_ll_queue_arrive;
+typedef struct queue_to_arrive{
+  int slot;
+  int urgent;
+  int fuel;
+  int eta;
+  ptr_ll_queue_arrive next;
+}node_queue_to_arrive;
+
+typedef struct queue_to_departure* ptr_ll_queue_departure;
+typedef struct queue_to_departure{
+  int slot;
+  int takeoff;
+  ptr_ll_queue_departure next;
+}node_queue_to_departure;
+
 void init_shared_memory();
 void read_config();
 void sim_manager();
@@ -91,16 +125,27 @@ void *departure_worker();
 void* arrival_worker();
 ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id);
 void cleanup();
-
+void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int type_rcv);
+void fill_message_departures(message* msg, Ll_departures_to_create flight_info,int type_rcv);
+//CONTROL tower
+void* manage_worker();
+ptr_ll_queue_arrive sorted_insert_queue_to_arrive(ptr_ll_queue_arrive list, ptr_ll_queue_arrive new);
+ptr_ll_queue_departure sorted_insert_queue_to_departure(ptr_ll_queue_departure list, ptr_ll_queue_departure new);
 //GLOBAL VARIABLES
 Config_options options;
 //linked lists
 ptr_ll_threads thread_list = NULL;
 ptr_ll_departures_to_create departures_list = NULL;
 ptr_ll_arrivals_to_create arrivals_list = NULL;
+ptr_ll_queue_arrive queue_to_arrive = NULL;
+ptr_ll_queue_departure queue_to_departure = NULL;
 int shmid;
 int fd;
 int msq_id;
+// 1 FOR URGENT
+// 2 FOR SEND TO CONTROL TOWER
+// 3+ for send to each flight
+
 int time_counter;
 int atm_departures = 0;
 int atm_arrivals = 0;
@@ -110,7 +155,7 @@ FILE* log_fich;
 sem_t* sem_write_log;
 sem_t* sem_shared_stats;
 sem_t* sem_shared_flight_slots;
-sem_t* sem_manage_flights; // if 0 means that there is no flight to manage
+sem_t* sem_shared_crtl_c;
 pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
@@ -118,5 +163,8 @@ pthread_mutex_t mutex_atm_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_atm_arrivals = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_time_counter = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_cond = PTHREAD_MUTEX_INITIALIZER;
+//PARA CT
+pthread_mutex_t mutex_ll_departures_queue = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_ll_landings_queue = PTHREAD_MUTEX_INITIALIZER;
 // cond variables
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;

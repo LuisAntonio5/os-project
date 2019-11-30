@@ -1,128 +1,12 @@
 //gcc main.c -lpthread -D_REENTRANT -Wall -o projeto
 //ps -ef | grep projeto
 //ipcs
-#include <stdlib.h>
-#include <stdio.h>
-#include <pthread.h>
-#include <semaphore.h>
-#include <sys/time.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include "string.h"
-#include <signal.h>
-#include <semaphore.h>
-#include <sys/msg.h>
-
-#define PIPE_NAME "my_pipe"
-#define LOG_NAME "log.txt"
-#define DEBUG
-#define BUFFER_LENGTH 100
-#define TIME_NOW_LENGTH 9
-#define CONFIG_FILE_NAME "config.txt"
-#define FLIGHT_CODE_MAX_LENGTH 15
+// echo "ARRIVAL TP437 init: 100 eta: 100 fuel: 1000" > my_pipe
+//TRABALHO REALIZADO POR BERNARDO M S PRIOR 2018285108 e POR LUIS ANTONIO LIMA DA SILVA 2018278644
+#include "header.h"
 
 
-//HEADER FILE
-typedef struct config_options {
-  int ut;
-  int takeoff_dur, takeoff_int;
-  int landing_dur, landing_int;
-  int max_holding, min_holding;
-  int max_takeoffs;
-  int max_landings;
-}Config_options;
-
-typedef struct stats{
-  int num_created_flights;
-  int num_landed;
-  int avg_wait_land_time;
-  int num_takeoffs;
-  int avg_wait_takeoff_time;
-  int avg_holdings;
-  int avg_emergency_holdings;
-  int redirected_flights;
-  int num_rejected;
-}Stats;
-
-typedef struct{
-  Stats stats;
-  int* flight_slots;
-} mem_structure;
-mem_structure* shared_memory;
-
-typedef struct ll_threads* ptr_ll_threads;
-typedef struct ll_threads{
-  pthread_t this_thread;
-  ptr_ll_threads next;
-}Ll_threads;
-
-typedef struct ll_departures_to_create* ptr_ll_departures_to_create;
-typedef struct ll_departures_to_create{
-  char flight_code[FLIGHT_CODE_MAX_LENGTH];
-  int init;
-  int takeoff;
-  ptr_ll_departures_to_create next;
-}Ll_departures_to_create;
-
-typedef struct ll_arrivals_to_create* ptr_ll_arrivals_to_create;
-typedef struct ll_arrivals_to_create{
-  char flight_code[FLIGHT_CODE_MAX_LENGTH];
-  int init;
-  int eta;
-  int fuel;
-  ptr_ll_arrivals_to_create next;
-}Ll_arrivals_to_create;
-
-void init_shared_memory();
-void read_config();
-void sim_manager();
-int validate_command(char* command);
-int check_only_numbers(char* str);
-void get_current_time_to_string(char* return_string);
-ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread);
-void control_tower();
-ptr_ll_departures_to_create sorted_insert_departures(ptr_ll_departures_to_create list, ptr_ll_departures_to_create new);
-ptr_ll_arrivals_to_create sorted_insert_arrivals(ptr_ll_arrivals_to_create list, ptr_ll_arrivals_to_create new);
-void *pipe_worker();
-void *time_worker();
-void *departure_worker();
-void* arrival_worker();
-ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id);
-void cleanup();
-
-//GLOBAL VARIABLES
-Config_options options;
-//linked lists
-ptr_ll_threads thread_list = NULL;
-ptr_ll_departures_to_create departures_list = NULL;
-ptr_ll_arrivals_to_create arrivals_list = NULL;
-int shmid;
-int fd;
-int msq_id;
-int time_counter;
-int atm_departures = 0;
-int atm_arrivals = 0;
-FILE* log_fich;
-
-// semaphores
-sem_t* sem_write_log;
-sem_t* sem_shared_stats;
-sem_t* sem_shared_flight_slots;
-sem_t* sem_manage_flights; // if 0 means that there is no flight to manage
-pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_ll_create_departures = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_atm_departures = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_atm_arrivals = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_time_counter = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_cond = PTHREAD_MUTEX_INITIALIZER;
-// cond variables
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+// FIM HEADER
 
 void sigint(int num){
   #ifdef DEBUG
@@ -202,9 +86,12 @@ int main(void){
   //semaphore to write on log.txt
   sem_unlink("SEM_LOG");
   sem_write_log = sem_open("SEM_LOG", O_CREAT|O_EXCL, 0700, 1);
-  //semaphore to write on shared mem
+  //semaphore to write on shared mem stats
   sem_unlink("sem_shared_stats");
   sem_shared_stats = sem_open("sem_shared_stats", O_CREAT|O_EXCL, 0700, 1);
+  //semaphore to write on shared mem slots
+  sem_unlink("sem_shared_flight_slots");
+  sem_shared_flight_slots = sem_open("sem_shared_flight_slots", O_CREAT|O_EXCL, 0700, 1);
   //create control tower process
   if(fork() == 0){
     control_tower();
@@ -248,15 +135,14 @@ void sim_manager(){
 void *pipe_worker(){
   char buffer[BUFFER_LENGTH];
   char time_string[TIME_NOW_LENGTH];
-
+  int n;
   fd = open(PIPE_NAME,O_RDWR);
-  printf("%d\n", options.max_takeoffs);
   while(1){
-    read(fd,buffer,sizeof(buffer));
+    n = read(fd,buffer,sizeof(buffer));
+    buffer[n-1] = '\0';
     #ifdef DEBUG
-    printf("%s", buffer);
+    printf("%s\n", buffer);
     #endif
-    buffer[strlen(buffer)-1] = '\0';
     if(validate_command(buffer)){
       sem_wait(sem_write_log);
       log_fich = fopen(LOG_NAME,"a");
@@ -287,7 +173,7 @@ void *pipe_worker(){
     }
 
     //clearing buffer after each command -> avoids problems
-    memset(buffer,0,sizeof(buffer));
+    //memset(buffer,0,sizeof(buffer));
 
 
   }
@@ -305,7 +191,7 @@ void * time_worker(){
     pthread_mutex_lock(&mutex_time_counter);
     time_counter++;
     pthread_mutex_unlock(&mutex_time_counter);
-    //printf("%d\n", time_counter);
+    // printf("%d\n", time_counter);
     //counting time in milliseconds
     usleep(options.ut * 1000);
 
@@ -358,7 +244,6 @@ void * time_worker(){
         //print da lista das thread_list
         aux= thread_list;
         while(aux){
-          printf("%ld\n", aux->this_thread);
           aux=aux->next;
         }
       }
@@ -398,10 +283,11 @@ int validate_command(char* command){
       init_time = atoi(split_command[3]);
       // todo : validate init time!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
       pthread_mutex_lock(&mutex_time_counter);
-      if(init_time<time_counter || atm_departures == options.max_takeoffs){
+      if(init_time<time_counter){
         #ifdef DEBUG
         printf("INVALID COMMAND\n");
         #endif
+        pthread_mutex_unlock(&mutex_time_counter);
         return 0;
       }
       pthread_mutex_unlock(&mutex_time_counter);
@@ -411,10 +297,9 @@ int validate_command(char* command){
       new_departure->init = init_time;
       new_departure->takeoff= takeoff;
       new_departure->next = NULL;
+      #ifdef DEBUG
       printf("%s %d %d\n", new_departure->flight_code, new_departure->init, new_departure->takeoff);
-      pthread_mutex_lock(&mutex_atm_departures);
-      atm_departures++;
-      pthread_mutex_unlock(&mutex_atm_departures);
+      #endif
       pthread_mutex_lock(&mutex_ll_create_departures);
       departures_list = sorted_insert_departures(departures_list, new_departure);
       pthread_mutex_unlock(&mutex_ll_create_departures);
@@ -435,10 +320,11 @@ int validate_command(char* command){
       eta = atoi(split_command[5]);
       fuel = atoi(split_command[7]);
       pthread_mutex_lock(&mutex_time_counter);
-      if (eta > fuel || init_time<time_counter || atm_arrivals == options.max_landings ) {
+      if (eta > fuel || init_time<time_counter) {
         #ifdef DEBUG
         printf("INVALID COMMAND\n");
         #endif
+        pthread_mutex_unlock(&mutex_time_counter);
         return 0;
       }
       pthread_mutex_unlock(&mutex_time_counter);
@@ -449,11 +335,6 @@ int validate_command(char* command){
       new_arrival->eta = eta;
       new_arrival->fuel = fuel;
       new_arrival->next = NULL;
-      printf("%s %d %d\n", new_arrival->flight_code, new_arrival->init, new_arrival->fuel);
-
-      pthread_mutex_lock(&mutex_atm_arrivals);
-      atm_arrivals++;
-      pthread_mutex_unlock(&mutex_atm_arrivals);
       pthread_mutex_lock(&mutex_ll_create_arrivals);
       arrivals_list = sorted_insert_arrivals(arrivals_list, new_arrival);
       pthread_mutex_unlock(&mutex_ll_create_arrivals);
@@ -530,7 +411,8 @@ void init_shared_memory(){
   shared_memory->stats.avg_emergency_holdings = 0;
   shared_memory->stats.redirected_flights = 0;
   shared_memory->stats.num_rejected = 0;
-  shared_memory->flight_slots = (int*)calloc(options.max_landings + options.max_takeoffs,sizeof(int));
+  // shared_memory->flight_slots = (int*)calloc(options.max_landings + options.max_takeoffs,sizeof(int));
+  //shared_memory->flight_slots[i] == 0, espaço nao ocupado
 }
 
 ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
@@ -548,6 +430,7 @@ ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
 //MDUAR FICHEIRO
 void control_tower(){
   char time_string[TIME_NOW_LENGTH];
+  pthread_t new_thread;
   sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
@@ -559,8 +442,115 @@ void control_tower(){
   fprintf(log_fich, "%s Created process: %d and %d\n", time_string, getppid(), getpid());
   fclose(log_fich);
   sem_post(sem_write_log);
-  exit(0);
+
+  //STARTS HERE
+  if (pthread_create(&new_thread,NULL,manage_worker, NULL)){
+    printf("error creating thread\n");
+    exit(-1);
+  }
+  pthread_mutex_lock(&mutex_ll_threads);
+  thread_list = insert_thread(thread_list, new_thread);
+  pthread_mutex_unlock(&mutex_ll_threads);
+  pause();
 }
+
+void* manage_worker(){
+  message msg;
+  message_give_slot msgSend;
+  ptr_ll_queue_arrive newArrive;
+  ptr_ll_queue_departure newDeparture;
+  int i = 0;
+  int slot;
+  while(1){
+    msgrcv(msq_id, &msg, sizeof(msg)-sizeof(long), -2, 0);
+    #ifdef DEBUG
+    printf("MESSAGE READ\n");
+    #endif
+
+    sem_wait(sem_shared_flight_slots);
+    while(shared_memory->flight_slots[i] != UNUSED_SLOT){
+      i++;
+    }
+    slot = i;
+    shared_memory->flight_slots[i] = 1;
+    printf("I %d\n", shared_memory->flight_slots[i]);
+    msgSend.slot = slot;
+    msgSend.msgtype = msg.type_rcv;
+    printf("%d\n", msgSend.msgtype);
+    sem_post(sem_shared_flight_slots);
+    msgsnd(msq_id,&msgSend,sizeof(msgSend)-sizeof(long),0);
+    //ADICIONA NA QUEUE PARA ATERRAR OU DESCOLAR
+    if(msg.type == 'a'){
+      newArrive = (ptr_ll_queue_arrive)malloc(sizeof(node_queue_to_arrive));
+      newArrive->slot = slot;
+      newArrive->urgent = 0;
+      newArrive->fuel = msg.fuel;
+      newArrive->eta = msg.eta;
+      queue_to_arrive = sorted_insert_queue_to_arrive(queue_to_arrive,newArrive);
+    }
+    else if(msg.type == 'd'){
+      newDeparture = (ptr_ll_queue_departure)malloc(sizeof(node_queue_to_departure));
+      newDeparture->slot = slot;
+      newDeparture->takeoff = msg.takeoff;
+      queue_to_departure = sorted_insert_queue_to_departure(queue_to_departure,newDeparture);
+    }
+  }
+
+}
+
+ptr_ll_queue_arrive sorted_insert_queue_to_arrive(ptr_ll_queue_arrive list, ptr_ll_queue_arrive new){
+  ptr_ll_queue_arrive current = list, ant = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      if (new->eta <= current->eta) {
+        if (ant == NULL) {
+          new->next = current;
+          return new;
+        }
+        else{
+          ant->next = new;
+          new->next = current;
+          return list;
+        }
+      }
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
+}
+
+ptr_ll_queue_departure sorted_insert_queue_to_departure(ptr_ll_queue_departure list, ptr_ll_queue_departure new){
+  ptr_ll_queue_departure current = list, ant = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      if (new->takeoff <= current->takeoff) {
+        if (ant == NULL) {
+          new->next = current;
+          return new;
+        }
+        else{
+          ant->next = new;
+          new->next = current;
+          return list;
+        }
+      }
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
+}
+
+//FIM CT
 
 ptr_ll_departures_to_create sorted_insert_departures(ptr_ll_departures_to_create list, ptr_ll_departures_to_create new){
   ptr_ll_departures_to_create current = list, ant = NULL;
@@ -617,6 +607,16 @@ ptr_ll_arrivals_to_create sorted_insert_arrivals(ptr_ll_arrivals_to_create list,
 void* departure_worker(void* ptr_ll_departure){
   Ll_departures_to_create flight_info = *((ptr_ll_departures_to_create)ptr_ll_departure);
   char time_string[TIME_NOW_LENGTH];
+  message msg;
+  message_give_slot msgSlot;
+  int type_rcv;
+  sem_wait(sem_shared_stats);
+  shared_memory->stats.num_created_flights++;
+  type_rcv = shared_memory->stats.num_created_flights + 2;
+  //SE CALHAR MUDAR AQUI O METODO
+  sem_post(sem_shared_stats);
+  //fill message queue message
+  fill_message_departures(&msg,flight_info,type_rcv);
 
   sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
@@ -629,6 +629,15 @@ void* departure_worker(void* ptr_ll_departure){
   printf("%s DEPARTURE %s CREATED\n",time_string,flight_info.flight_code);
   fclose(log_fich);
   sem_post(sem_write_log);
+
+
+  //SEND message
+  msgsnd(msq_id, &msg, sizeof(msg)-sizeof(long), 0);
+
+  //wait for slot
+  printf("%d\n", type_rcv);
+  msgrcv(msq_id,&msgSlot,sizeof(msgSlot)-sizeof(long),type_rcv,0);
+  printf("PONTEIRO: %d CONTEUDO: %d\n",msgSlot.slot,shared_memory->flight_slots[msgSlot.slot] );
 
   // FALTA FAZER CONTROLO DE PISTAS 2 META
   usleep(1000 * flight_info.takeoff);
@@ -645,9 +654,6 @@ void* departure_worker(void* ptr_ll_departure){
   fclose(log_fich);
   sem_post(sem_write_log);
 
-  pthread_mutex_lock(&mutex_atm_departures);
-  atm_departures--;
-  pthread_mutex_unlock(&mutex_atm_departures);
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = remove_thread_from_ll(thread_list,pthread_self());
   free(ptr_ll_departure);
@@ -659,7 +665,16 @@ void* departure_worker(void* ptr_ll_departure){
 void* arrival_worker(void* ptr_ll_arrival){
   Ll_arrivals_to_create flight_info = *((ptr_ll_arrivals_to_create)ptr_ll_arrival);
   char time_string[TIME_NOW_LENGTH];
-
+  message msg;
+  message_give_slot msgSlot;
+  int type_rcv;
+  sem_wait(sem_shared_stats);
+  shared_memory->stats.num_created_flights++;
+  type_rcv = shared_memory->stats.num_created_flights + 2;
+  //SE CALHAR MUDAR AQUI O METODO
+  sem_post(sem_shared_stats);
+  //fill message queue message
+  fill_message_arrivals(&msg,flight_info,type_rcv);
   sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
   if(log_fich == NULL){
@@ -672,6 +687,12 @@ void* arrival_worker(void* ptr_ll_arrival){
   fclose(log_fich);
   sem_post(sem_write_log);
 
+  //SEND MESSAGE
+  msgsnd(msq_id, &msg, sizeof(msg)-sizeof(long), 0);
+  //wait for slot
+  printf("%d\n", type_rcv);
+  msgrcv(msq_id,&msgSlot,sizeof(msgSlot)-sizeof(long),type_rcv,0);
+  printf("PONTEIRO: %d CONTEUDO: %d\n",msgSlot.slot,shared_memory->flight_slots[msgSlot.slot] );
   // FALTA FAZER CONTROLO DE PISTAS
   usleep(1000 * flight_info.eta);
 
@@ -686,10 +707,6 @@ void* arrival_worker(void* ptr_ll_arrival){
   printf("ARRIVAL %s CONCLUDED\n",flight_info.flight_code);
   fclose(log_fich);
   sem_post(sem_write_log);
-
-  pthread_mutex_lock(&mutex_atm_arrivals);
-  atm_arrivals--;
-  pthread_mutex_unlock(&mutex_atm_arrivals);
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = remove_thread_from_ll(thread_list,pthread_self());
   free(ptr_ll_arrival);
@@ -720,6 +737,29 @@ ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id){
     }
   }
   return list;
+}
+
+void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int type_rcv){
+  msg->type = 'a';
+  msg->fuel = flight_info.fuel;
+  msg->eta = flight_info.eta;
+  msg->takeoff = -1;
+  msg->type_rcv = type_rcv;
+  if(msg->fuel == msg->eta + options.landing_dur +4){
+    msg->msgtype = 1;
+  }
+  else{
+    msg->msgtype = 2;
+  }
+}
+
+void fill_message_departures(message* msg, Ll_departures_to_create flight_info, int type_rcv){
+  msg->type = 'a';
+  msg->fuel = -1;
+  msg->eta = -1;
+  msg->takeoff = flight_info.takeoff;
+  msg->msgtype = 2;
+  msg->type_rcv = type_rcv;
 }
 
 void cleanup(){
