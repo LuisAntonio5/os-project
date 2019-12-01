@@ -52,6 +52,7 @@ typedef struct{
   Stats stats;
   int flight_slots[100];
   //PROBLEMA: RESOLVER ISTO
+  int time_counter;
 } mem_structure;
 mem_structure* shared_memory;
 
@@ -93,21 +94,21 @@ typedef struct message_slot{
   int slot;
 } message_give_slot;
 
-typedef struct queue_to_arrive* ptr_ll_queue_arrive;
-typedef struct queue_to_arrive{
+typedef struct wait_queue_arrivals* ptr_ll_wait_arrivals;
+typedef struct wait_queue_arrivals{
   int slot;
   int urgent;
   int fuel;
   int eta;
-  ptr_ll_queue_arrive next;
-}node_queue_to_arrive;
+  ptr_ll_wait_arrivals next;
+}node_wait_queue_arrivals;
 
-typedef struct queue_to_departure* ptr_ll_queue_departure;
-typedef struct queue_to_departure{
+typedef struct wait_queue_departures* ptr_ll_wait_departures;
+typedef struct wait_queue_departures{
   int slot;
   int takeoff;
-  ptr_ll_queue_departure next;
-}node_queue_to_departure;
+  ptr_ll_wait_departures next;
+}node_wait_queue_departures;
 
 void init_shared_memory();
 void read_config();
@@ -128,25 +129,27 @@ void cleanup();
 void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int type_rcv);
 void fill_message_departures(message* msg, Ll_departures_to_create flight_info,int type_rcv);
 //CONTROL tower
+void* time_worker_ct();
 void* manage_worker();
-ptr_ll_queue_arrive sorted_insert_queue_to_arrive(ptr_ll_queue_arrive list, ptr_ll_queue_arrive new);
-ptr_ll_queue_departure sorted_insert_queue_to_departure(ptr_ll_queue_departure list, ptr_ll_queue_departure new);
-//GLOBAL VARIABLES
+ptr_ll_wait_arrivals sorted_insert_wait_queue_arrivals(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new);
+ptr_ll_wait_departures sorted_insert_wait_queue_departures(ptr_ll_wait_departures list, ptr_ll_wait_departures new);
+ptr_ll_wait_arrivals insert_to_arrive(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new);
+ptr_ll_wait_departures insert_to_departure(ptr_ll_wait_departures list, ptr_ll_wait_departures new);//GLOBAL VARIABLES
 Config_options options;
 //linked lists
 ptr_ll_threads thread_list = NULL;
 ptr_ll_departures_to_create departures_list = NULL;
 ptr_ll_arrivals_to_create arrivals_list = NULL;
-ptr_ll_queue_arrive queue_to_arrive = NULL;
-ptr_ll_queue_departure queue_to_departure = NULL;
+ptr_ll_wait_arrivals wait_queue_arrivals = NULL;
+ptr_ll_wait_departures wait_queue_departures = NULL;
 int shmid;
 int fd;
 int msq_id;
 // 1 FOR URGENT
+
 // 2 FOR SEND TO CONTROL TOWER
 // 3+ for send to each flight
 
-int time_counter;
 int atm_departures = 0;
 int atm_arrivals = 0;
 FILE* log_fich;
@@ -156,15 +159,18 @@ sem_t* sem_write_log;
 sem_t* sem_shared_stats;
 sem_t* sem_shared_flight_slots;
 sem_t* sem_shared_crtl_c;
+sem_t* sem_shared_time_counter;
+//semaphore for time counter sync
+sem_t* sem_go_time_sm;
+sem_t* sem_go_time_ct;
 pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_atm_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_atm_arrivals = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_time_counter = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_cond = PTHREAD_MUTEX_INITIALIZER;
 //PARA CT
-pthread_mutex_t mutex_ll_departures_queue = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t mutex_ll_landings_queue = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_ll_wait_departures_queue = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_ll_wait_arrivals_queue = PTHREAD_MUTEX_INITIALIZER;
 // cond variables
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;

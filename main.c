@@ -92,6 +92,14 @@ int main(void){
   //semaphore to write on shared mem slots
   sem_unlink("sem_shared_flight_slots");
   sem_shared_flight_slots = sem_open("sem_shared_flight_slots", O_CREAT|O_EXCL, 0700, 1);
+  //semaphore to write on shared time time_counter
+  sem_unlink("SEM_TIME_COUNTER");
+  sem_shared_time_counter = sem_open("SEM_TIME_COUNTER", O_CREAT|O_EXCL, 0700, 1);
+  //sems for sync time beetwen processes
+  sem_unlink("SEM_GO_TIME_SM");
+  sem_go_time_sm = sem_open("SEM_GO_TIME_SM", O_CREAT|O_EXCL, 0700, 1);
+  sem_unlink("SEM_GO_TIME_CT");
+  sem_go_time_ct = sem_open("SEM_GO_TIME_CT", O_CREAT|O_EXCL, 0700, 0);
   //create control tower process
   if(fork() == 0){
     control_tower();
@@ -186,20 +194,27 @@ void * time_worker(){
   ptr_ll_threads aux;
   ptr_ll_departures_to_create currentDepartures;
   pthread_t new_thread;
-  time_counter = 0;
+  sem_wait(sem_shared_time_counter);
+  shared_memory->time_counter = 0;
+  sem_post(sem_shared_time_counter);
   while(1){
-    pthread_mutex_lock(&mutex_time_counter);
-    time_counter++;
-    pthread_mutex_unlock(&mutex_time_counter);
-    // printf("%d\n", time_counter);
-    //counting time in milliseconds
-    usleep(options.ut * 1000);
+    sem_wait(sem_go_time_sm);
+    printf("TOU VIVO\n");
 
-    if (arrivals_list != NULL && arrivals_list->init == time_counter) {
+    sem_wait(sem_shared_time_counter);
+    shared_memory->time_counter++;
+    printf("%d\n", shared_memory->time_counter);
+    sem_post(sem_shared_time_counter);
+    // printf("%d\n", time_counter);
+    //Allow time CT
+
+
+
+    if (arrivals_list != NULL && arrivals_list->init == shared_memory->time_counter) {
       //time to create at least one arrival
       currentArrival = arrivals_list;
       printf("a\n");
-      while(currentArrival && currentArrival->init == time_counter){
+      while(currentArrival && currentArrival->init == shared_memory->time_counter){
         if (pthread_create(&new_thread,NULL,arrival_worker, currentArrival->flight_code)){
           printf("error creating thread\n");
           exit(-1);
@@ -222,11 +237,11 @@ void * time_worker(){
       }
     }
 
-    if (departures_list != NULL && departures_list->init == time_counter) {
+    if (departures_list != NULL && departures_list->init == shared_memory->time_counter) {
       //time to create at least one departure
       currentDepartures = departures_list;
       printf("a\n");
-      while(currentDepartures && currentDepartures->init == time_counter){
+      while(currentDepartures && currentDepartures->init == shared_memory->time_counter){
         if (pthread_create(&new_thread,NULL,departure_worker, currentDepartures->flight_code)){
           printf("error creating thread\n");
           exit(-1);
@@ -248,6 +263,9 @@ void * time_worker(){
         }
       }
     }
+    sem_post(sem_go_time_ct);
+    //counting time in milliseconds
+    usleep(options.ut * 1000);
   }
 }
 
@@ -282,15 +300,15 @@ int validate_command(char* command){
       //Reach here if everything is OK
       init_time = atoi(split_command[3]);
       // todo : validate init time!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-      pthread_mutex_lock(&mutex_time_counter);
-      if(init_time<time_counter){
+      sem_wait(sem_shared_time_counter);
+      if(init_time<shared_memory->time_counter){
         #ifdef DEBUG
         printf("INVALID COMMAND\n");
         #endif
-        pthread_mutex_unlock(&mutex_time_counter);
+        sem_post(sem_shared_time_counter);
         return 0;
       }
-      pthread_mutex_unlock(&mutex_time_counter);
+      sem_post(sem_shared_time_counter);
       takeoff = atoi(split_command[5]);
       new_departure = (ptr_ll_departures_to_create) malloc(sizeof(Ll_departures_to_create));
       strcpy(new_departure->flight_code,split_command[1]);
@@ -319,15 +337,15 @@ int validate_command(char* command){
       init_time = atoi(split_command[3]);
       eta = atoi(split_command[5]);
       fuel = atoi(split_command[7]);
-      pthread_mutex_lock(&mutex_time_counter);
-      if (eta > fuel || init_time<time_counter) {
+      sem_wait(sem_shared_time_counter);
+      if (eta > fuel || init_time<shared_memory->time_counter) {
         #ifdef DEBUG
         printf("INVALID COMMAND\n");
         #endif
-        pthread_mutex_unlock(&mutex_time_counter);
+        sem_post(sem_shared_time_counter);
         return 0;
       }
-      pthread_mutex_unlock(&mutex_time_counter);
+      sem_post(sem_shared_time_counter);
       //Reach here if everything is OK
       new_arrival = (ptr_ll_arrivals_to_create) malloc(sizeof(Ll_arrivals_to_create));
       strcpy(new_arrival->flight_code,split_command[1]);
@@ -448,17 +466,162 @@ void control_tower(){
     printf("error creating thread\n");
     exit(-1);
   }
+  //CREATE THREAD FOR MESSAGE QUEUE
+  pthread_mutex_lock(&mutex_ll_threads);
+  thread_list = insert_thread(thread_list, new_thread);
+  pthread_mutex_unlock(&mutex_ll_threads);
+
+  if (pthread_create(&new_thread,NULL,time_worker_ct, NULL)){
+    printf("error creating thread\n");
+    exit(-1);
+  }
+  //CREATE THREAD FOR TIMER
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = insert_thread(thread_list, new_thread);
   pthread_mutex_unlock(&mutex_ll_threads);
   pause();
 }
 
+void printLista(ptr_ll_wait_arrivals list){
+  ptr_ll_wait_arrivals aux = list;
+  while(aux){
+    printf("LISTA %d\n", aux->slot);
+    aux = aux->next;
+  }
+}
+
+void printListaD(ptr_ll_wait_departures list){
+  ptr_ll_wait_departures aux = list;
+  while(aux){
+    printf("LISTA %d\n", aux->slot);
+    aux = aux->next;
+  }
+}
+
+void* time_worker_ct(){
+  ptr_ll_wait_arrivals arrival_queue;
+  ptr_ll_wait_departures departure_queue;
+  ptr_ll_wait_arrivals current_wait_arrivals,ant_wait_arrivals = NULL;
+  ptr_ll_wait_departures current_wait_departures,ant_wait_departures = NULL;
+  while(1){
+    ant_wait_arrivals = NULL;
+    ant_wait_departures = NULL;
+    sem_wait(sem_go_time_ct);
+    pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
+    current_wait_arrivals = wait_queue_arrivals;
+    pthread_mutex_unlock(&mutex_ll_wait_arrivals_queue);
+    pthread_mutex_lock(&mutex_ll_wait_departures_queue);
+    current_wait_departures = wait_queue_departures;
+    pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
+
+    //CHEGADAS
+    pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
+    while(current_wait_arrivals){
+      current_wait_arrivals->fuel--;
+      current_wait_arrivals->eta--;
+      if(current_wait_arrivals->fuel == 0){
+        #ifdef DEBUG
+        printf("Slot: %d Sem FUEL\n",current_wait_arrivals->slot);
+        #endif
+        //TODO: ENVIAR O VOO PARA O CARALHO
+      }
+      else if(current_wait_arrivals->eta == 0){
+        //REMOVE NA LISTA WAIT
+        if(ant_wait_arrivals){
+          ant_wait_arrivals->next = current_wait_arrivals->next;
+        }
+        else{
+          wait_queue_arrivals = current_wait_arrivals->next;
+        }
+        //ADICIONA A LISTA DE ESPERA PARA ENTRAR
+        //TODO: VERIFICAR SE SAO MAIS DE 5, SE SIM HOLD
+        current_wait_arrivals->next = NULL;
+        arrival_queue = insert_to_arrive(arrival_queue,current_wait_arrivals);
+        printf("LISTA DOS WAITS\n");
+        printLista(wait_queue_arrivals);
+        printf("LISTA DOS MANAGE\n");
+        printLista(arrival_queue);
+      }
+      ant_wait_arrivals = current_wait_arrivals;
+      current_wait_arrivals = current_wait_arrivals->next;
+    }
+    pthread_mutex_unlock(&mutex_ll_wait_arrivals_queue);
+
+    //SAIDAS
+    pthread_mutex_lock(&mutex_ll_wait_departures_queue);
+    while(current_wait_departures){
+      current_wait_departures->takeoff--;
+      if(current_wait_departures->takeoff == 0){
+        //REMOVE NA LISTA WAIT
+        if(ant_wait_departures){
+          ant_wait_departures->next = current_wait_departures->next;
+        }
+        else{
+          wait_queue_departures = current_wait_departures->next;
+        }
+        //ADICIONA A LISTA DE ESPERA PARA ENTRAR
+        current_wait_departures->next = NULL;
+        departure_queue = insert_to_departure(departure_queue,current_wait_departures);
+        printf("LISTA DOS WAITS\n");
+        printListaD(wait_queue_departures);
+        printf("LISTA DOS MANAGE\n");
+        printListaD(departure_queue);
+      }
+      ant_wait_departures = current_wait_departures;
+      current_wait_departures = current_wait_departures->next;
+    }
+    pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
+    sem_post(sem_go_time_sm);
+  }
+}
+
+ptr_ll_wait_arrivals insert_to_arrive(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new){
+  ptr_ll_wait_arrivals current = list, ant = NULL;
+  new->next = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      if (new->fuel <= current->fuel) {
+        if (ant == NULL) {
+          new->next = current;
+          return new;
+        }
+        else{
+          ant->next = new;
+          new->next = current;
+          return list;
+        }
+      }
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
+}
+
+ptr_ll_wait_departures insert_to_departure(ptr_ll_wait_departures list, ptr_ll_wait_departures new){
+  ptr_ll_wait_departures current = list, ant = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
+}
+
 void* manage_worker(){
   message msg;
   message_give_slot msgSend;
-  ptr_ll_queue_arrive newArrive;
-  ptr_ll_queue_departure newDeparture;
+  ptr_ll_wait_arrivals newArrive;
+  ptr_ll_wait_departures newDeparture;
   int i = 0;
   int slot;
   while(1){
@@ -481,25 +644,32 @@ void* manage_worker(){
     msgsnd(msq_id,&msgSend,sizeof(msgSend)-sizeof(long),0);
     //ADICIONA NA QUEUE PARA ATERRAR OU DESCOLAR
     if(msg.type == 'a'){
-      newArrive = (ptr_ll_queue_arrive)malloc(sizeof(node_queue_to_arrive));
+      newArrive = (ptr_ll_wait_arrivals)malloc(sizeof(node_wait_queue_arrivals));
       newArrive->slot = slot;
       newArrive->urgent = 0;
       newArrive->fuel = msg.fuel;
+      newArrive->next= NULL;
       newArrive->eta = msg.eta;
-      queue_to_arrive = sorted_insert_queue_to_arrive(queue_to_arrive,newArrive);
+      pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
+      wait_queue_arrivals = sorted_insert_wait_queue_arrivals(wait_queue_arrivals,newArrive);
+      pthread_mutex_unlock(&mutex_ll_wait_arrivals_queue);
     }
     else if(msg.type == 'd'){
-      newDeparture = (ptr_ll_queue_departure)malloc(sizeof(node_queue_to_departure));
+      newDeparture = (ptr_ll_wait_departures)malloc(sizeof(node_wait_queue_departures));
       newDeparture->slot = slot;
+      newDeparture->next = NULL;
       newDeparture->takeoff = msg.takeoff;
-      queue_to_departure = sorted_insert_queue_to_departure(queue_to_departure,newDeparture);
+      pthread_mutex_lock(&mutex_ll_wait_departures_queue);
+      wait_queue_departures = sorted_insert_wait_queue_departures(wait_queue_departures,newDeparture);
+      pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
     }
   }
 
 }
 
-ptr_ll_queue_arrive sorted_insert_queue_to_arrive(ptr_ll_queue_arrive list, ptr_ll_queue_arrive new){
-  ptr_ll_queue_arrive current = list, ant = NULL;
+ptr_ll_wait_arrivals sorted_insert_wait_queue_arrivals(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new){
+  ptr_ll_wait_arrivals current = list, ant = NULL;
+  new->next = NULL;
   if (list == NULL) {
     return new;
   }
@@ -524,8 +694,9 @@ ptr_ll_queue_arrive sorted_insert_queue_to_arrive(ptr_ll_queue_arrive list, ptr_
   }
 }
 
-ptr_ll_queue_departure sorted_insert_queue_to_departure(ptr_ll_queue_departure list, ptr_ll_queue_departure new){
-  ptr_ll_queue_departure current = list, ant = NULL;
+ptr_ll_wait_departures sorted_insert_wait_queue_departures(ptr_ll_wait_departures list, ptr_ll_wait_departures new){
+  ptr_ll_wait_departures current = list, ant = NULL;
+  new->next = NULL;
   if (list == NULL) {
     return new;
   }
@@ -754,7 +925,7 @@ void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int 
 }
 
 void fill_message_departures(message* msg, Ll_departures_to_create flight_info, int type_rcv){
-  msg->type = 'a';
+  msg->type = 'd';
   msg->fuel = -1;
   msg->eta = -1;
   msg->takeoff = flight_info.takeoff;
