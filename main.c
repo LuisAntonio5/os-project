@@ -92,6 +92,7 @@ int main(void){
   //semaphore to write on shared mem slots
   sem_unlink("sem_shared_flight_slots");
   sem_shared_flight_slots = sem_open("sem_shared_flight_slots", O_CREAT|O_EXCL, 0700, 1);
+
   //create control tower process
   if(fork() == 0){
     control_tower();
@@ -138,6 +139,15 @@ void *pipe_worker(){
   int n;
   fd = open(PIPE_NAME,O_RDWR);
   while(1){
+    //sigaction
+    sigprocmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
+    sigusr1.sa_flags = 0;
+    sigusr1.sa_handler = sigusr1_handler;
+    sigemptyset(&sigusr1.sa_mask);
+    sigaction(SIGUSR1, &sigusr1, NULL);
+    sigaddset(&sigusr1.sa_mask, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+
     n = read(fd,buffer,sizeof(buffer));
     buffer[n-1] = '\0';
     #ifdef DEBUG
@@ -425,6 +435,20 @@ ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
     new->next = list;
   }
   return new;
+}
+
+void sigusr1_handler(int signal){
+  sem_wait(sem_shared_stats);
+  printf("Número total de voos criados: %d\n", shared_memory->stats.num_created_flights);
+  printf("Número total de voos que aterraram: %d\n", shared_memory->stats.num_landed);
+  printf("Tempo média de espera (para além do ETA) para aterrar: %d\n", shared_memory->stats.avg_wait_land_time);
+  printf("Número total de voos que descolaram: %d\n", shared_memory->stats.num_takeoffs);
+  printf("Tempo médio de espera para descolar: %d\n", shared_memory->stats.avg_wait_takeoff_time);
+  printf("Número médio de manobras de holding por voo de aterragem: %d\n", shared_memory->stats.avg_holdings);
+  printf("Número médio de manobras de holding por voo em estado de urgência: %d\n", shared_memory->stats.avg_emergency_holdings);
+  printf("Número de voos redirecionados para outro aeroporto: %d\n", shared_memory->stats.redirected_flights);
+  printf("Voos rejeitados pela Torre de Controlo: %d\n", shared_memory->stats.num_rejected);
+  sem_post(sem_shared_stats);
 }
 
 //MDUAR FICHEIRO

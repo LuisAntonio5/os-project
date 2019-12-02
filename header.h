@@ -131,6 +131,10 @@ void fill_message_departures(message* msg, Ll_departures_to_create flight_info,i
 void* manage_worker();
 ptr_ll_queue_arrive sorted_insert_queue_to_arrive(ptr_ll_queue_arrive list, ptr_ll_queue_arrive new);
 ptr_ll_queue_departure sorted_insert_queue_to_departure(ptr_ll_queue_departure list, ptr_ll_queue_departure new);
+
+//signals
+void sigusr1_handler(int signal);
+
 //GLOBAL VARIABLES
 Config_options options;
 //linked lists
@@ -150,6 +154,9 @@ int time_counter;
 int atm_departures = 0;
 int atm_arrivals = 0;
 FILE* log_fich;
+
+//signals
+struct sigaction sigusr1;
 
 // semaphores
 sem_t* sem_write_log;
