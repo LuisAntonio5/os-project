@@ -103,6 +103,12 @@ typedef struct wait_queue_arrivals{
   ptr_ll_wait_arrivals next;
 }node_wait_queue_arrivals;
 
+typedef struct ptr_wait_queue_arrivals* ptr_to_ptr_wait_queue_arrivals;
+typedef struct ptr_wait_queue_arrivals{
+  ptr_ll_wait_arrivals arrival;
+  ptr_to_ptr_wait_queue_arrivals next;
+}node_ptr_wait_queue_arrivals;
+
 typedef struct wait_queue_departures* ptr_ll_wait_departures;
 typedef struct wait_queue_departures{
   int slot;
@@ -134,7 +140,9 @@ void* manage_worker();
 ptr_ll_wait_arrivals sorted_insert_wait_queue_arrivals(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new);
 ptr_ll_wait_departures sorted_insert_wait_queue_departures(ptr_ll_wait_departures list, ptr_ll_wait_departures new);
 ptr_ll_wait_arrivals insert_to_arrive(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new);
-ptr_ll_wait_departures insert_to_departure(ptr_ll_wait_departures list, ptr_ll_wait_departures new);//GLOBAL VARIABLES
+ptr_ll_wait_departures insert_to_departure(ptr_ll_wait_departures list, ptr_ll_wait_departures new);
+void schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrivals arrivals_queue);
+//GLOBAL VARIABLES
 Config_options options;
 //linked lists
 ptr_ll_threads thread_list = NULL;

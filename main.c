@@ -199,7 +199,6 @@ void * time_worker(){
   sem_post(sem_shared_time_counter);
   while(1){
     sem_wait(sem_go_time_sm);
-    printf("TOU VIVO\n");
 
     sem_wait(sem_shared_time_counter);
     shared_memory->time_counter++;
@@ -498,9 +497,34 @@ void printListaD(ptr_ll_wait_departures list){
   }
 }
 
+void sub_1_takeoff(ptr_ll_wait_departures list){
+  ptr_ll_wait_departures aux = list;
+  while(aux){
+    printf("\t\t%d\n", aux->takeoff);
+    aux->takeoff--;
+    aux = aux->next;
+  }
+}
+
+void sub_1_eta(ptr_ll_wait_arrivals list){
+  ptr_ll_wait_arrivals aux = list;
+  while(aux){
+    printf("\t\t%d\n", aux->eta);
+    aux->eta--;
+    aux->fuel--;
+    if(aux-> fuel == 0){
+      //TODO: ENVIAR SHUTDOWN NO AVIAO
+      #ifdef DEBUG
+      printf("\tFUEL 0\n");
+      #endif
+    }
+    aux = aux->next;
+  }
+}
+
 void* time_worker_ct(){
-  ptr_ll_wait_arrivals arrival_queue;
-  ptr_ll_wait_departures departure_queue;
+  ptr_ll_wait_arrivals arrival_queue = NULL;
+  ptr_ll_wait_departures departure_queue = NULL;
   ptr_ll_wait_arrivals current_wait_arrivals,ant_wait_arrivals = NULL;
   ptr_ll_wait_departures current_wait_departures,ant_wait_departures = NULL;
   while(1){
@@ -514,11 +538,10 @@ void* time_worker_ct(){
     current_wait_departures = wait_queue_departures;
     pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
 
+
     //CHEGADAS
     pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
     while(current_wait_arrivals){
-      current_wait_arrivals->fuel--;
-      current_wait_arrivals->eta--;
       if(current_wait_arrivals->fuel == 0){
         #ifdef DEBUG
         printf("Slot: %d Sem FUEL\n",current_wait_arrivals->slot);
@@ -542,6 +565,8 @@ void* time_worker_ct(){
         printf("LISTA DOS MANAGE\n");
         printLista(arrival_queue);
       }
+      current_wait_arrivals->fuel--;
+      current_wait_arrivals->eta--;
       ant_wait_arrivals = current_wait_arrivals;
       current_wait_arrivals = current_wait_arrivals->next;
     }
@@ -550,7 +575,6 @@ void* time_worker_ct(){
     //SAIDAS
     pthread_mutex_lock(&mutex_ll_wait_departures_queue);
     while(current_wait_departures){
-      current_wait_departures->takeoff--;
       if(current_wait_departures->takeoff == 0){
         //REMOVE NA LISTA WAIT
         if(ant_wait_departures){
@@ -559,7 +583,8 @@ void* time_worker_ct(){
         else{
           wait_queue_departures = current_wait_departures->next;
         }
-        //ADICIONA A LISTA DE ESPERA PARA ENTRAR
+        // ADICIONA A LISTA DE ESPERA PARA ENTRAR
+        // ADICIONA NO FIM, ASSIM ESTA ORDENADA POR > WAITING TIME
         current_wait_departures->next = NULL;
         departure_queue = insert_to_departure(departure_queue,current_wait_departures);
         printf("LISTA DOS WAITS\n");
@@ -567,11 +592,144 @@ void* time_worker_ct(){
         printf("LISTA DOS MANAGE\n");
         printListaD(departure_queue);
       }
+      else{
+        current_wait_departures->takeoff--;
+      }
+
       ant_wait_departures = current_wait_departures;
       current_wait_departures = current_wait_departures->next;
     }
     pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
+
+    //AQUI AS LISTAS DE WAIT E QUEUE ESTAO ATUALIZADAS
+    // ALGORITMO DE ESCALONAMENTO
+    // 1 PRIORIDADE: EXISTEM URGENTES
+    // 2 PRIORIDADE: EXISTE FUEL SUFICIENTE NOS ARRIVALS PARA AGUENTAR UM TAKEOFF
+    // 3 PRIORIDADE: COMPARA WAITING TIMES
+    // SE IGUAIS OPTA POR ARRIVALS
+    // AUTALIZA TAKEOFF E ETA NAS QUEUES, NECESSARIO PARA O SORT POR WAIITNG TIME E PARA MUDAR ATERR/DESC
+    schedule_flights(departure_queue,arrival_queue);
+
+    sub_1_takeoff(departure_queue);
+    sub_1_eta(arrival_queue);
+    //FIM
     sem_post(sem_go_time_sm);
+  }
+}
+
+ptr_to_ptr_wait_queue_arrivals insert_node_waiting_sort(ptr_to_ptr_wait_queue_arrivals list, ptr_to_ptr_wait_queue_arrivals new){
+  ptr_to_ptr_wait_queue_arrivals current = list, ant = NULL;
+  if (list == NULL) {
+    return new;
+  }
+  else{
+    while (current != NULL) {
+      if (new->arrival->eta <= current->arrival->eta) {
+        if (ant == NULL) {
+          new->next = current;
+          return new;
+        }
+        else{
+          ant->next = new;
+          new->next = current;
+          return list;
+        }
+      }
+      ant = current;
+      current = current->next;
+    }
+    ant->next = new;
+    return list;
+  }
+}
+
+ptr_to_ptr_wait_queue_arrivals sort_waiting_time_arrivals(ptr_ll_wait_arrivals list){
+  ptr_ll_wait_arrivals aux = list;
+  ptr_to_ptr_wait_queue_arrivals new;
+  ptr_to_ptr_wait_queue_arrivals sorted = NULL;
+  if(!list){
+    return NULL;
+  }
+  while(aux){
+    new = (ptr_to_ptr_wait_queue_arrivals)malloc(sizeof(node_ptr_wait_queue_arrivals));
+    new->arrival = aux;
+    new->next = NULL;
+    sorted = insert_node_waiting_sort(sorted,new);
+    aux = aux->next;
+  }
+  return sorted;
+}
+
+void schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrivals arrivals_queue){
+  ptr_ll_wait_arrivals aux_arrivals = arrivals_queue ;
+  ptr_ll_wait_departures aux_departures = departures_queue;
+  float avg_waiting_time_arrivals = 0;
+  float avg_waiting_time_departures = 0;
+  int choice = 0;
+  // choice==1 -> go arrivals choice==2 -> go departures
+  ptr_to_ptr_wait_queue_arrivals sorted_waiting_time_arrival_queue = NULL;
+  ptr_to_ptr_wait_queue_arrivals current_sorted_waiting_time_arrival_queue = NULL;
+  if(departures_queue && arrivals_queue){
+    // URGENTES ESTÃO NA CABEÇA SEMPRE, SE A CABEÇA FOR NAO URGENTE NAO EXISTEM URGENTES NA LISTA
+    if(arrivals_queue->urgent){
+      printf("HA URGENTES\n");
+    }
+    else{
+      //NAO HA URGENTES A PRIORIDADE É VER SE EXISTE FUEL SUFICIENTE PARA UM TAKEOFF
+      // DUVIDA
+      if(arrivals_queue->fuel > options.takeoff_dur + options.takeoff_int){
+        //COMPARAR WAITING TIMES, REDUZIR AO MAXIMO
+        // MAX WAITING TIME ESTA NA CABEÇA DO DEPARTURES, NOS ARRIVALS A CABEÇA E O MENOR FUEL
+        printf("HA FUEL %d\n", arrivals_queue->fuel);
+        sorted_waiting_time_arrival_queue = sort_waiting_time_arrivals(arrivals_queue);
+        // ALGORITMO PARA COMPARAR DUAS LL PARA OBTER QUAL TEM MAIOR WAITING TIME
+        current_sorted_waiting_time_arrival_queue = sorted_waiting_time_arrival_queue;
+        if(current_sorted_waiting_time_arrival_queue->next != NULL){
+          avg_waiting_time_arrivals = (current_sorted_waiting_time_arrival_queue->arrival->eta + current_sorted_waiting_time_arrival_queue->next->arrival->eta)/2;
+        }
+        else{
+          avg_waiting_time_arrivals = current_sorted_waiting_time_arrival_queue->arrival->eta;
+        }
+        if(aux_departures->next != NULL){
+          avg_waiting_time_departures = (aux_departures->takeoff + aux_departures->next->takeoff)/2;
+        }
+        else{
+          avg_waiting_time_departures = aux_departures->takeoff;
+        }
+        avg_waiting_time_arrivals = avg_waiting_time_arrivals - 2*avg_waiting_time_arrivals;
+        avg_waiting_time_departures = avg_waiting_time_departures - 2*avg_waiting_time_departures;
+        printf("\tWAITING TIME ARRIVALS %f\n",avg_waiting_time_arrivals );
+        printf("\tWAITING TIME DEPARTURES %f\n",avg_waiting_time_departures);
+        if(avg_waiting_time_departures > avg_waiting_time_arrivals){
+          choice = 2;
+        }
+        else{
+          choice = 1;
+        }
+      }
+      else{
+        // GO ARRIVALS PARA DIMINUIR AO MAXIMO N VOOS REJEITADOS
+        choice = 1;
+      }
+    }
+  }
+  else if(departures_queue && !arrivals_queue){
+    choice = 2;
+  }
+  else if(arrivals_queue && !departures_queue){
+    choice = 1;
+  }
+  if(choice==1){
+    #ifdef DEBUG
+    printf("\tARRIVALS\n");
+    #endif
+    //TODO: GERE ARRIVALS
+  }
+  if(choice==2){
+    #ifdef DEBUG
+    printf("\tDEPARTURES\n");
+    #endif
+    //TODO: GERE DEPARTURES ADICIONANDO UM TIMER PARA ESPERAR PARA VERIFICAR OUTRA VEZ
   }
 }
 
@@ -646,7 +804,12 @@ void* manage_worker(){
     if(msg.type == 'a'){
       newArrive = (ptr_ll_wait_arrivals)malloc(sizeof(node_wait_queue_arrivals));
       newArrive->slot = slot;
-      newArrive->urgent = 0;
+      if(msg.msgtype == 1){
+        newArrive->urgent = 1;
+      }
+      else{
+        newArrive->urgent = 0;
+      }
       newArrive->fuel = msg.fuel;
       newArrive->next= NULL;
       newArrive->eta = msg.eta;
