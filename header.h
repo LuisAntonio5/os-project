@@ -150,29 +150,6 @@ int msq_id;
 // 2 FOR SEND TO CONTROL TOWER
 // 3+ for send to each flight
 
-
-//cona//
-
-// então todos os que queres ignorar metes para dentro de um sigset
-// por exemplo sigemptyset (&block_sigs); (isto é paraa esvasiares o set, para teres a certeza que n há lá lixo)
-// depois adicionas os sinais que queres ignorar, assim:
-// 	sigfillset
-// sigremset sigint
-// sigrem set sigusr1
-// no final de teres adicionado todos os que queres ignorar, fazes:
-// pthread_sigmask
-// sigprocmask(SIG_BLOCK,&block_sigs, NULL);
-// para dizer que os queres bloquear
-// depois tens que apanhar o sigint e o sigusr1
-// eu costumava fazer assim:
-// if(signal(SIGINT,funcao_de_tratamento)==SIG_ERR){
-//            funcao_de_erro();
-// }
-
-//  sigdelset(&sigusr1.sa_mask, SIGUSR1);
-//  sigdelset(&sigusr1.sa_mask, SIGINT);
-
-
 int time_counter;
 int atm_departures = 0;
 int atm_arrivals = 0;
