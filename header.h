@@ -25,6 +25,7 @@
 #define DEBUG
 #define UNUSED_SLOT 0
 #define WAITING_ORDERS 1
+#define GO 2
 
 //HEADER FILE
 typedef struct config_options {
@@ -53,6 +54,11 @@ typedef struct{
   int flight_slots[100];
   //PROBLEMA: RESOLVER ISTO
   int time_counter;
+  int runway[2][4];
+  /* ____________________________
+    | P1 | P2 | TIMEP1 | TIMEP2 | ARRIVALS -> If(P1 && !TIMEP1{VOO a acontecer em p1} If(!p1 && !TimeP2){Segurança}
+    | P3 | P4 | TIMEP3 | TIMEP4 | DEPARTURES
+    _____________________________ */
 } mem_structure;
 mem_structure* shared_memory;
 
@@ -130,6 +136,7 @@ void *pipe_worker();
 void *time_worker();
 void *departure_worker();
 void* arrival_worker();
+void* notify_worker();
 ptr_ll_threads remove_thread_from_ll(ptr_ll_threads list,pthread_t thread_id);
 void cleanup();
 void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int type_rcv);
@@ -141,7 +148,8 @@ ptr_ll_wait_arrivals sorted_insert_wait_queue_arrivals(ptr_ll_wait_arrivals list
 ptr_ll_wait_departures sorted_insert_wait_queue_departures(ptr_ll_wait_departures list, ptr_ll_wait_departures new);
 ptr_ll_wait_arrivals insert_to_arrive(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new);
 ptr_ll_wait_departures insert_to_departure(ptr_ll_wait_departures list, ptr_ll_wait_departures new);
-void schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrivals arrivals_queue);
+int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrivals arrivals_queue);
+void sub_1_times_runways();
 //GLOBAL VARIABLES
 Config_options options;
 //linked lists
@@ -167,10 +175,13 @@ sem_t* sem_write_log;
 sem_t* sem_shared_stats;
 sem_t* sem_shared_flight_slots;
 sem_t* sem_shared_crtl_c;
+sem_t* sem_shared_runway;
 sem_t* sem_shared_time_counter;
 //semaphore for time counter sync
 sem_t* sem_go_time_sm;
 sem_t* sem_go_time_ct;
+//semaphore to notify threads from other process
+sem_t* sem_cond;
 pthread_mutex_t mutex_ll_threads = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
