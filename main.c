@@ -36,6 +36,13 @@ void sigint(int num){
 int main(void){
   read_config(&options);
 
+  sigusr1.sa_flags = 0;
+  sigusr1.sa_handler = sigusr1_handler;
+  sigemptyset(&sigusr1.sa_mask);
+  sigfillset(&sigusr1.sa_mask);
+  sigprocmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+  // pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+
   // while(1){
   //   gettimeofday(&now, NULL);
   //   printf("%ld\n", now.tv_usec);
@@ -94,7 +101,7 @@ int main(void){
   sem_shared_flight_slots = sem_open("sem_shared_flight_slots", O_CREAT|O_EXCL, 0700, 1);
 
   //create control tower process
-  if(fork() == 0){
+  if((pid_ct = fork()) == 0){
     control_tower();
   }
   else{
@@ -106,7 +113,7 @@ int main(void){
 
 void sim_manager(){
   pthread_t new_thread;
-  signal(SIGINT,sigint);
+
   // create thread to manage pipe input
   if (pthread_create(&new_thread,NULL,pipe_worker, NULL)){
     printf("error creating thread\n");
@@ -127,8 +134,17 @@ void sim_manager(){
   thread_list = insert_thread(thread_list, new_thread);
   pthread_mutex_unlock(&mutex_ll_threads);
 
-  // fix este join, funciona só para nao acabar o programa
-  pthread_join(new_thread,NULL);
+  //sigaction
+  pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
+  sigusr1.sa_flags = 0;
+  sigusr1.sa_handler = sigusr1_handler;
+  sigemptyset(&sigusr1.sa_mask);
+  sigfillset(&sigusr1.sa_mask);
+  sigdelset(&sigusr1.sa_mask, SIGINT);
+  pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+
+  signal(SIGINT,sigint);
+  pause();
 }
 
 
@@ -139,14 +155,6 @@ void *pipe_worker(){
   int n;
   fd = open(PIPE_NAME,O_RDWR);
   while(1){
-    //sigaction
-    sigprocmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
-    sigusr1.sa_flags = 0;
-    sigusr1.sa_handler = sigusr1_handler;
-    sigemptyset(&sigusr1.sa_mask);
-    sigaction(SIGUSR1, &sigusr1, NULL);
-    sigaddset(&sigusr1.sa_mask, SIGUSR1);
-    sigprocmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
 
     n = read(fd,buffer,sizeof(buffer));
     buffer[n-1] = '\0';
@@ -439,6 +447,7 @@ ptr_ll_threads insert_thread(ptr_ll_threads list, pthread_t new_thread){
 
 void sigusr1_handler(int signal){
   sem_wait(sem_shared_stats);
+  printf("\n\t\t\t[Statistics]\n\n");
   printf("Número total de voos criados: %d\n", shared_memory->stats.num_created_flights);
   printf("Número total de voos que aterraram: %d\n", shared_memory->stats.num_landed);
   printf("Tempo média de espera (para além do ETA) para aterrar: %d\n", shared_memory->stats.avg_wait_land_time);
@@ -460,6 +469,7 @@ void control_tower(){
   if(log_fich == NULL){
     printf("Error opening %s", LOG_NAME);
   }
+
   //GET CURRENT TIME
   get_current_time_to_string(time_string);
   printf("%s Created process: %d and %d\n", time_string, getppid(), getpid());
@@ -475,7 +485,21 @@ void control_tower(){
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = insert_thread(thread_list, new_thread);
   pthread_mutex_unlock(&mutex_ll_threads);
-  pause();
+
+  //sigaction
+  pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
+  sigusr1.sa_flags = 0;
+  sigusr1.sa_handler = sigusr1_handler;
+  sigemptyset(&sigusr1.sa_mask);
+  sigfillset(&sigusr1.sa_mask);
+  sigdelset(&sigusr1.sa_mask, SIGUSR1);
+  pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+
+  while (1) {
+    sigaction(SIGUSR1, &sigusr1, NULL);
+    pause();
+  }
+
 }
 
 void* manage_worker(){
@@ -790,6 +814,7 @@ void cleanup(){
   //CLEAN SHARED MEMORY
   shmdt(shared_memory);
 	shmctl(shmid, IPC_RMID,NULL);
+  kill (pid_ct, SIGKILL);
   //DESTROY SEMAPHROE
   sem_destroy(sem_write_log);
   sem_destroy(sem_shared_stats);
