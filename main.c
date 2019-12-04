@@ -29,13 +29,17 @@ void sigint(int num){
   #endif
   cleanup();
   exit(0);
-
-
 }
 
 int main(void){
   read_config(&options);
 
+  sigusr1.sa_flags = 0;
+  sigusr1.sa_handler = sigusr1_handler;
+  sigemptyset(&sigusr1.sa_mask);
+  sigfillset(&sigusr1.sa_mask);
+  sigprocmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+ // pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
   // while(1){
   //   gettimeofday(&now, NULL);
   //   printf("%ld\n", now.tv_usec);
@@ -80,6 +84,8 @@ int main(void){
   }
   //INIT SHARED MEMORY
   init_shared_memory();
+  //zero runways array
+  zero_runways();
   #ifdef DEBUG
   printf("Shared memory initialized\n");
   #endif
@@ -107,19 +113,29 @@ int main(void){
   sem_unlink("SEM_COND");
   sem_cond = sem_open("SEM_COND", O_CREAT|O_EXCL, 0700, 0);
   //create control tower process
-  if(fork() == 0){
+  if((pid_ct = fork()) == 0){
     control_tower();
   }
   else{
     sim_manager();
   }
 
+  // //sigaction
+  // pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
+  // sigusr1.sa_flags = 0;
+  // sigusr1.sa_handler = sigusr1_handler;
+  // sigemptyset(&sigusr1.sa_mask);
+  // sigfillset(&sigusr1.sa_mask);
+  // sigdelset(&sigusr1.sa_mask, SIGINT);
+  // pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+  //
+  // signal(SIGINT,sigint);
+  // pause();
   return 0;
 }
 
 void sim_manager(){
   pthread_t new_thread;
-  signal(SIGINT,sigint);
   // create thread to manage pipe input
   if (pthread_create(&new_thread,NULL,pipe_worker, NULL)){
     printf("error creating thread\n");
@@ -150,8 +166,20 @@ void sim_manager(){
   thread_list = insert_thread(thread_list, new_thread);
   pthread_mutex_unlock(&mutex_ll_threads);
 
-  // fix este join, funciona só para nao acabar o programa
-  pthread_join(new_thread,NULL);
+  // // fix este join, funciona só para nao acabar o programa
+  // pthread_join(new_thread,NULL);
+
+  //sigaction
+  pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
+  sigusr1.sa_flags = 0;
+  sigusr1.sa_handler = sigusr1_handler;
+  sigemptyset(&sigusr1.sa_mask);
+  sigfillset(&sigusr1.sa_mask);
+  sigdelset(&sigusr1.sa_mask, SIGINT);
+  pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+
+  signal(SIGINT,sigint);
+  pause();
 }
 
 
@@ -444,11 +472,6 @@ void init_shared_memory(){
   shared_memory->stats.avg_emergency_holdings = 0;
   shared_memory->stats.redirected_flights = 0;
   shared_memory->stats.num_rejected = 0;
-  for(int i=0;i<2;i++){
-    for(int k=0;k<2;k++){
-      shared_memory->runway[i][k] = 0;
-    }
-  }
   // shared_memory->flight_slots = (int*)calloc(options.max_landings + options.max_takeoffs,sizeof(int));
   //shared_memory->flight_slots[i] == 0, espaço nao ocupado
 }
@@ -499,7 +522,20 @@ void control_tower(){
   pthread_mutex_lock(&mutex_ll_threads);
   thread_list = insert_thread(thread_list, new_thread);
   pthread_mutex_unlock(&mutex_ll_threads);
-  pause();
+
+  //sigaction
+  pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
+  sigusr1.sa_flags = 0;
+  sigusr1.sa_handler = sigusr1_handler;
+  sigemptyset(&sigusr1.sa_mask);
+  sigfillset(&sigusr1.sa_mask);
+  sigdelset(&sigusr1.sa_mask, SIGUSR1);
+  pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
+
+  while (1) {
+    sigaction(SIGUSR1, &sigusr1, NULL);
+    pause();
+  }
 }
 
 void printLista(ptr_ll_wait_arrivals list){
@@ -546,15 +582,17 @@ void printListaD(ptr_ll_wait_departures list){
 void* time_worker_ct(){
   int choice = 0;
   int timer = 0;
-  ptr_ll_wait_arrivals arrival_queue = NULL;
-  ptr_ll_wait_departures departure_queue = NULL;
+  ptr_ll_wait_arrivals free_arrival;
+  ptr_ll_wait_departures free_departure;
   ptr_ll_wait_arrivals current_wait_arrivals,ant_wait_arrivals = NULL,next_wait_arrivals;
   ptr_ll_wait_departures current_wait_departures,ant_wait_departures = NULL,next_wait_departures;
+  ptr_ll_wait_arrivals current_arrival_queue;
   while(1){
     ant_wait_arrivals = NULL;
     ant_wait_departures = NULL;
     next_wait_arrivals = NULL;
     next_wait_departures = NULL;
+    current_arrival_queue = arrival_queue;
     sem_wait(sem_go_time_ct);
     sem_wait(sem_shared_time_counter);
     timer = shared_memory->time_counter;
@@ -566,15 +604,37 @@ void* time_worker_ct(){
     current_wait_departures = wait_queue_departures;
     pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
 
+    //DECREMENTA FUEL NA LISTA QUE ESTA A ESPERA PARA ATERRAR
+    while(current_arrival_queue){
+      current_arrival_queue->fuel--;
+      current_arrival_queue = current_arrival_queue->next;
+    }
+
+    //TODO: SEMAFORO DESTAs LISTAs LIGADAs
     //CHEGADAS
     pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
     while(current_wait_arrivals){
-      printf("TIME %d\n", current_wait_arrivals->eta);
+      printf("\t\tFUEL %d\n", current_wait_arrivals->fuel);
       if(current_wait_arrivals->fuel == 0){
         #ifdef DEBUG
         printf("Slot: %d Sem FUEL\n",current_wait_arrivals->slot);
         #endif
         //TODO: ENVIAR O VOO PARA O CARALHO
+        sem_wait(sem_shared_flight_slots);
+        shared_memory->flight_slots[current_wait_arrivals->slot] = NO_FUEL;
+        sem_post(sem_shared_flight_slots);
+        sem_post(sem_cond);
+        //REMOVE NO NA LISTA
+        free_arrival = current_wait_arrivals;
+        current_wait_arrivals = current_wait_arrivals->next;
+        free(free_arrival);
+        if(ant_wait_arrivals){
+          ant_wait_arrivals->next = current_wait_arrivals;
+        }
+        else{
+          wait_queue_arrivals = current_wait_arrivals;
+        }
+
       }
       else if(current_wait_arrivals->eta == timer){
         //REMOVE NA LISTA WAIT
@@ -585,26 +645,42 @@ void* time_worker_ct(){
           wait_queue_arrivals = current_wait_arrivals->next;
         }
         //ADICIONA A LISTA DE ESPERA PARA ENTRAR
-        //TODO: VERIFICAR SE SAO MAIS DE 5, SE SIM HOLD
         next_wait_arrivals = current_wait_arrivals->next;
         current_wait_arrivals->next = NULL;
         current_wait_arrivals->fuel--;
+        if(current_wait_arrivals->urgent){
+          sem_wait(sem_shared_flight_slots);
+          shared_memory->flight_slots[current_wait_arrivals->slot] = URGENT_REQUEST;
+          sem_post(sem_shared_flight_slots);
+          sem_post(sem_cond);
+        }
         arrival_queue = insert_to_arrive(arrival_queue,current_wait_arrivals);
+        #ifdef DEBUG
         printf("LISTA DOS WAITS\n");
         printLista(wait_queue_arrivals);
         printf("LISTA DOS MANAGE\n");
         printLista(arrival_queue);
+        #endif
         current_wait_arrivals = next_wait_arrivals;
 
       }
       else{
+        //DECREMENTA O FUEL DE CADA UM QUE ESTA COM ETA > TIMER
         current_wait_arrivals->fuel--;
         ant_wait_arrivals = current_wait_arrivals;
         current_wait_arrivals = current_wait_arrivals->next;
       }
     }
     pthread_mutex_unlock(&mutex_ll_wait_arrivals_queue);
-
+    //AQUI A LISTA DA QUEUE ARRIVALS ESTA ATUALIZADA, TEMOS TODOS OS VOOS QUE ESPERAM PARA ATERRAR EM arrival_queue
+    //SE LEN MAIOR QUE 5 TEMOS QUE MANDAR HOLD PARA OS QUE TÊM MENOR PRIORIDADE
+    send_holdings();
+    #ifdef DEBUG
+    printf("LISTA DOS WAITS\n");
+    printLista(wait_queue_arrivals);
+    printf("LISTA DOS MANAGE\n");
+    printLista(arrival_queue);
+    #endif
     //SAIDAS
     pthread_mutex_lock(&mutex_ll_wait_departures_queue);
     while(current_wait_departures){
@@ -634,6 +710,7 @@ void* time_worker_ct(){
     }
     pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
 
+    verify_arrivals_in_queue();
 
     sub_1_times_runways();
 
@@ -649,53 +726,72 @@ void* time_worker_ct(){
     #endif
     if(choice==1){
       //GO ARRIVAL
-      if(!shared_memory->runway[0][0] && !shared_memory->runway[0][2] && arrival_queue){
+      if(!runways[0][0] && !runways[0][2] && arrival_queue){
         //GO ARRIVAL PISTA 1
+        #ifdef DEBUG
         printf("   A PISTA 1\n");
-        shared_memory->runway[0][0] = options.landing_dur;
+        #endif
+        runways[0][0] = options.landing_dur;
         //ALTERA SLOT
         sem_wait(sem_shared_flight_slots);
-        shared_memory->flight_slots[arrival_queue->slot] = GO;
+        shared_memory->flight_slots[arrival_queue->slot] = GO_28L;
         sem_post(sem_shared_flight_slots);
         //NOTIFY
         sem_post(sem_cond);
+        free_arrival = arrival_queue;
         arrival_queue = arrival_queue->next;
+        free(free_arrival);
       }
-      if(!shared_memory->runway[0][1] && !shared_memory->runway[0][3] && arrival_queue){
+      if(!runways[0][1] && !runways[0][3] && arrival_queue){
         //GO ARRIVAL PISTA 2
+        #ifdef DEBUG
         printf("   A PISTA 2\n");
-        shared_memory->runway[0][1] = options.landing_dur;
+        #endif
+        runways[0][1] = options.landing_dur;
         //ALTERA SLOT
-        shared_memory->flight_slots[arrival_queue->slot] = GO;
+        shared_memory->flight_slots[arrival_queue->slot] = GO_28R;
         //NOTiFY
         sem_post(sem_cond);
+        free_arrival = arrival_queue;
         arrival_queue = arrival_queue->next;
+        free(free_arrival);
       }
     }
 
     else if(choice == 2){
       //GO DEPARTURE
-      if(!shared_memory->runway[1][0] && !shared_memory->runway[1][2] && departure_queue){
+      if(!runways[1][0] && !runways[1][2] && departure_queue){
         //GO DEPARTURE PISTA 1
+        #ifdef DEBUG
         printf("   D PISTA 1\n");
-        shared_memory->runway[1][0] = options.takeoff_dur;
+        #endif
+        printf("a\n");
+        runways[1][0] = options.takeoff_dur;
         sem_wait(sem_shared_flight_slots);
-        shared_memory->flight_slots[departure_queue->slot] = GO;
+        printf("a\n");
+        shared_memory->flight_slots[departure_queue->slot] = GO_01L;
         sem_post(sem_shared_flight_slots);
-        // sleep(0.1);
+        printf("a\n");
         sem_post(sem_cond);
+        printf("a\n");
+        free_departure = departure_queue;
         departure_queue = departure_queue->next;
+        printf("a\n");
+        free(free_departure);
       }
-      if(!shared_memory->runway[1][1] && !shared_memory->runway[1][3] && departure_queue){
+      if(!runways[1][1] && !runways[1][3] && departure_queue){
         //GO DEPARTURE PISTA 2
+        #ifdef DEBUG
         printf("   D PISTA 2\n");
-        shared_memory->runway[1][1] = options.takeoff_dur;
+        #endif
+        runways[1][1] = options.takeoff_dur;
         sem_wait(sem_shared_flight_slots);
-        shared_memory->flight_slots[departure_queue->slot] = GO;
+        shared_memory->flight_slots[departure_queue->slot] = GO_01R;
         sem_post(sem_shared_flight_slots);
-        // sleep(0.1);
         sem_post(sem_cond);
+        free_departure = departure_queue;
         departure_queue = departure_queue->next;
+        free(free_departure);
       }
     }
 
@@ -704,40 +800,111 @@ void* time_worker_ct(){
   }
 }
 
+void verify_arrivals_in_queue(){
+  ptr_ll_wait_arrivals current = arrival_queue, ant = NULL;
+  while(current){
+    if(current->fuel == 0){
+      //NAO TEM FUEL REJEITAR
+      sem_wait(sem_shared_flight_slots);
+      shared_memory->flight_slots[current->slot] = NO_FUEL;
+      sem_post(sem_shared_flight_slots);
+      sem_post(sem_cond);
+      if(!ant){
+        arrival_queue = current->next;
+        current = current->next;
+      }
+      else{
+        ant->next = current->next;
+        free(current);
+        current = ant->next;
+      }
+    }
+    else{
+      ant = current;
+      current = current->next;
+    }
+  }
+}
+
+void send_holdings(){
+  ptr_ll_wait_arrivals current = arrival_queue, ant= NULL;
+  int num_node = 0;
+  int holding_time = 0;
+  while(current){
+    if(num_node>4){
+      //ENVIAR HOLD
+      //ELIMINAR NESTA LL
+      ant->next = current->next;
+      current->next = NULL;
+      //ADCIONAR À WAIT LIST, ONDE ETA > TIME_COUNTER
+      sem_wait(sem_shared_time_counter);
+      //COLOCAR O TEMPO DO HOLDING
+      holding_time = (rand() % (options.max_holding - options.min_holding + 1)) + options.min_holding;
+      current->eta = shared_memory->time_counter + holding_time;
+      sem_post(sem_shared_time_counter);
+      wait_queue_arrivals = sorted_insert_wait_queue_arrivals(wait_queue_arrivals,current);
+      sem_wait(sem_shared_flight_slots);
+      shared_memory->flight_slots[current->slot] = holding_time;
+      sem_post(sem_shared_flight_slots);
+      sem_post(sem_cond);
+      current = ant->next;
+      #ifdef DEBUG
+      printf("HOLDING ORDER\n");
+      #endif
+    }
+    else{
+      ant = current;
+      current = current->next;
+    }
+    num_node++;
+  }
+}
+
 void sub_1_times_runways(){
   sem_wait(sem_shared_runway);
-  if(shared_memory->runway[0][2]) shared_memory->runway[0][2]--;
-  if(shared_memory->runway[0][3]) shared_memory->runway[0][3]--;
-  if(shared_memory->runway[1][2]) shared_memory->runway[1][2]--;
-  if(shared_memory->runway[1][3]) shared_memory->runway[1][3]--;
+  if(runways[0][2]) runways[0][2]--;
+  if(runways[0][3]) runways[0][3]--;
+  if(runways[1][2]) runways[1][2]--;
+  if(runways[1][3]) runways[1][3]--;
 
-  if(shared_memory->runway[0][0]){
-    shared_memory->runway[0][0]--;
-    printf("\t\t\tSHARED %d\n", shared_memory->runway[0][0]);
-    if(!shared_memory->runway[0][0]){
-      shared_memory->runway[0][2] = options.landing_int;
+  if(runways[0][0]){
+    runways[0][0]--;
+    if(!runways[0][0]){
+      runways[0][2] = options.landing_int;
+      pthread_mutex_lock(&mutex_atm_arrivals);
+      atm_arrivals--;
+      pthread_mutex_unlock(&mutex_atm_arrivals);
     }
   }
-  if(shared_memory->runway[0][1]){
-    shared_memory->runway[0][1]--;
-    if(!shared_memory->runway[0][1]){
-      shared_memory->runway[0][3] = options.landing_int;
+  if(runways[0][1]){
+    runways[0][1]--;
+    if(!runways[0][1]){
+      runways[0][3] = options.landing_int;
+      pthread_mutex_lock(&mutex_atm_arrivals);
+      atm_arrivals--;
+      pthread_mutex_unlock(&mutex_atm_arrivals);
     }
   }
-  if(shared_memory->runway[1][0]){
-    shared_memory->runway[1][0]--;
-    if(!shared_memory->runway[1][0]){
-      shared_memory->runway[1][2] = options.takeoff_int;
+  if(runways[1][0]){
+    runways[1][0]--;
+    if(!runways[1][0]){
+      runways[1][2] = options.takeoff_int;
+      pthread_mutex_lock(&mutex_atm_departures);
+      atm_departures--;
+      pthread_mutex_unlock(&mutex_atm_departures);
     }
   }
-  if(shared_memory->runway[1][1]){
-    shared_memory->runway[1][1]--;
-    if(!shared_memory->runway[1][0]){
-      shared_memory->runway[1][3] = options.takeoff_int;
+  if(runways[1][1]){
+    runways[1][1]--;
+    if(!runways[1][1]){
+      runways[1][3] = options.takeoff_int;
+      pthread_mutex_lock(&mutex_atm_departures);
+      atm_departures--;
+      pthread_mutex_unlock(&mutex_atm_departures);
     }
   }
-  printf("D PISTA 1: %d TEMPO p1: %d PISTA 2:%d TEMPO p2: %d\n", shared_memory->runway[1][0],shared_memory->runway[1][2],shared_memory->runway[1][1],shared_memory->runway[1][3] );
-  printf("A PISTA 1: %d TEMPO p1: %d PISTA 2:%d TEMPO p2: %d\n", shared_memory->runway[0][0],shared_memory->runway[0][2],shared_memory->runway[0][1],shared_memory->runway[0][3] );
+  printf("D PISTA 1: %d TEMPO p1: %d PISTA 2:%d TEMPO p2: %d\n", runways[1][0],runways[1][2],runways[1][1],runways[1][3] );
+  printf("A PISTA 1: %d TEMPO p1: %d PISTA 2:%d TEMPO p2: %d\n", runways[0][0],runways[0][2],runways[0][1],runways[0][3] );
   sem_post(sem_shared_runway);
 }
 
@@ -784,25 +951,23 @@ ptr_to_ptr_wait_queue_arrivals sort_waiting_time_arrivals(ptr_ll_wait_arrivals l
   return sorted;
 }
 
-int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrivals arrivals_queue){
-  ptr_ll_wait_arrivals aux_arrivals = arrivals_queue ;
-  ptr_ll_wait_departures aux_departures = departures_queue;
+int schedule_flights(){
+  ptr_ll_wait_departures aux_departures = departure_queue;
   float avg_waiting_time_arrivals = 0;
   float avg_waiting_time_departures = 0;
   int choice = 0;
-  int wait_time = 0;
   // choice==1 -> go arrivals choice==2 -> go departures
   ptr_to_ptr_wait_queue_arrivals sorted_waiting_time_arrival_queue = NULL;
   ptr_to_ptr_wait_queue_arrivals current_sorted_waiting_time_arrival_queue = NULL;
-  if((shared_memory->runway[0][1] && shared_memory->runway[0][0]) ||( shared_memory->runway[1][1] && shared_memory->runway[1][0])){
+  if((runways[0][1] && runways[0][0]) ||( runways[1][1] && runways[1][0])){
     //NADA A FAZER
     return 0;
   }
 
-  if(departures_queue && arrivals_queue){
+  if(departure_queue && arrival_queue){
     // URGENTES ESTÃO NA CABEÇA SEMPRE, SE A CABEÇA FOR NAO URGENTE NAO EXISTEM URGENTES NA LISTA
-    sorted_waiting_time_arrival_queue = sort_waiting_time_arrivals(arrivals_queue);
-    if(arrivals_queue->urgent){
+    sorted_waiting_time_arrival_queue = sort_waiting_time_arrivals(arrival_queue);
+    if(arrival_queue->urgent){
       printf("HA URGENTES\n");
       choice = 1;
     }
@@ -811,10 +976,10 @@ int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrival
       // DUVIDA: O INTERVALO E POR PISTA?
 
       //ARRVIALS
-      if(shared_memory->runway[0][0] && !shared_memory->runway[0][3]){
+      if(runways[0][0] && !runways[0][3]){
         //PISTA 1 BLOQUEADA 2 LIVRE
         if(aux_departures->takeoff < sorted_waiting_time_arrival_queue->arrival->eta){
-          if(arrivals_queue->fuel > shared_memory->runway[0][0] + options.takeoff_dur){
+          if(arrival_queue->fuel > runways[0][0] + options.takeoff_dur){
             //NADA A FAZER, ESPERAR POR TAKEOFF
             #ifdef DEBUG
             printf("\t\tESPERAR POR NEXT\n");
@@ -825,10 +990,10 @@ int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrival
         // NAO HA FUEL SIGA ARRIVAL NA PISTA 2
         choice = 1;
       }
-      else if(shared_memory->runway[0][1] && !shared_memory->runway[0][2]){
+      else if(runways[0][1] && !runways[0][2]){
         //PISTA 2 BLOQUEADA 1 LIVRE
         if(aux_departures->takeoff < sorted_waiting_time_arrival_queue->arrival->eta){
-          if(arrivals_queue->fuel > shared_memory->runway[0][1] + options.takeoff_dur){
+          if(arrival_queue->fuel > runways[0][1] + options.takeoff_dur){
             //NADA A FAZER, ESPERAR POR TAKEOFF
             #ifdef DEBUG
             printf("\t\tESPERAR POR NEXT\n");
@@ -840,20 +1005,20 @@ int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrival
         choice = 1;
       }
         //DEPARTURES
-      else if((shared_memory->runway[1][0] && !shared_memory->runway[1][3]) || (shared_memory->runway[1][1] && !shared_memory->runway[1][2])){
+      else if((runways[1][0] && !runways[1][3]) || (runways[1][1] && !runways[1][2])){
         //PISTA 3 OCUPADA 4 LIVRE OU VICE VERSA
         if(sorted_waiting_time_arrival_queue->arrival->eta < aux_departures->takeoff){
           //NADA ACONTECE ESPERA PARA ARRIVAL
           return 0 ;
         }
-        else if(shared_memory->runway[0][0]){
-          if(arrivals_queue->fuel > shared_memory->runway[0][0] && arrivals_queue->fuel < options.takeoff_dur)
+        else if(runways[0][0]){
+          if(arrival_queue->fuel > runways[0][0] && arrival_queue->fuel < options.takeoff_dur)
             return 0 ;
           else choice = 2;
           //SO ESCOLHER ESPERAR SE NAO EXISTIR FUEL PARA OUTRO
         }
-        else if(shared_memory->runway[1][0]){
-          if(arrivals_queue->fuel > shared_memory->runway[1][0] && arrivals_queue->fuel < options.takeoff_dur)
+        else if(runways[1][0]){
+          if(arrival_queue->fuel > runways[1][0] && arrival_queue->fuel < options.takeoff_dur)
             return 0 ;
           else choice = 2;
           //SO ESCOLHER ESPERAR SE NAO EXISTIR FUEL PARA OUTRO
@@ -861,10 +1026,10 @@ int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrival
       }
       else{
         //NAO HA VOOS A ACONTECEREM
-        if(arrivals_queue->fuel > options.takeoff_dur){
+        if(arrival_queue->fuel > options.takeoff_dur){
           //COMPARAR WAITING TIMES, REDUZIR AO MAXIMO
           // MAX WAITING TIME ESTA NA CABEÇA DO DEPARTURES, NOS ARRIVALS A CABEÇA E O MENOR FUEL
-          printf("HA FUEL %d\n", arrivals_queue->fuel);
+          printf("HA FUEL %d\n", arrival_queue->fuel);
           // ALGORITMO PARA COMPARAR DUAS LL PARA OBTER QUAL TEM MAIOR WAITING TIME
           current_sorted_waiting_time_arrival_queue = sorted_waiting_time_arrival_queue;
           if(current_sorted_waiting_time_arrival_queue->next != NULL){
@@ -894,12 +1059,12 @@ int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrival
       }
     }
   }
-  else if(departures_queue && !arrivals_queue){
-    if(!shared_memory->runway[0][0] && !shared_memory->runway[0][1])
+  else if(departure_queue && !arrival_queue){
+    if(!runways[0][0] && !runways[0][1])
       choice = 2;
   }
-  else if(arrivals_queue && !departures_queue){
-    if(!shared_memory->runway[1][0] && !shared_memory->runway[1][1])
+  else if(arrival_queue && !departure_queue){
+    if(!runways[1][0] && !runways[1][1])
       choice = 1;
   }
   return choice;
@@ -908,12 +1073,13 @@ int schedule_flights(ptr_ll_wait_departures departures_queue,ptr_ll_wait_arrival
 ptr_ll_wait_arrivals insert_to_arrive(ptr_ll_wait_arrivals list, ptr_ll_wait_arrivals new){
   ptr_ll_wait_arrivals current = list, ant = NULL;
   new->next = NULL;
+  // printf("URGENTE:%d\n", new->urgent);
   if (list == NULL) {
     return new;
   }
   else{
     while (current != NULL) {
-      if (new->fuel <= current->fuel) {
+      if(new->urgent > current->urgent){
         if (ant == NULL) {
           new->next = current;
           return new;
@@ -922,6 +1088,19 @@ ptr_ll_wait_arrivals insert_to_arrive(ptr_ll_wait_arrivals list, ptr_ll_wait_arr
           ant->next = new;
           new->next = current;
           return list;
+        }
+      }
+      else{
+        if (new->fuel <= current->fuel) {
+          if (ant == NULL) {
+            new->next = current;
+            return new;
+          }
+          else{
+            ant->next = new;
+            new->next = current;
+            return list;
+          }
         }
       }
       ant = current;
@@ -965,42 +1144,73 @@ void* manage_worker(){
     }
     slot = i;
     sem_wait(sem_shared_flight_slots);
-    shared_memory->flight_slots[i] = 1;
+    shared_memory->flight_slots[i] = WAITING_ORDERS;
     sem_post(sem_shared_flight_slots);
     printf("I %d\n", shared_memory->flight_slots[i]);
     msgSend.slot = slot;
     msgSend.msgtype = msg.type_rcv;
-    printf("%d\n", msgSend.msgtype);
+    // printf("%ld\n", msgSend.msgtype);
     msgsnd(msq_id,&msgSend,sizeof(msgSend)-sizeof(long),0);
     //ADICIONA NA QUEUE PARA ATERRAR OU DESCOLAR
     if(msg.type == 'a'){
-      newArrive = (ptr_ll_wait_arrivals)malloc(sizeof(node_wait_queue_arrivals));
-      newArrive->slot = slot;
-      if(msg.msgtype == 1){
-        newArrive->urgent = 1;
+      pthread_mutex_lock(&mutex_atm_arrivals);
+      printf("%d\n", atm_arrivals);
+      if(options.max_landings <= atm_arrivals){
+        pthread_mutex_unlock(&mutex_atm_arrivals);
+        sem_wait(sem_shared_flight_slots);
+        shared_memory->flight_slots[slot] = REJECTED;
+        sem_post(sem_shared_flight_slots);
+        sem_wait(sem_shared_stats);
+        shared_memory->stats.num_rejected++;
+        sem_post(sem_shared_stats);
+        sem_post(sem_cond);
       }
       else{
-        newArrive->urgent = 0;
+        atm_arrivals++;
+        pthread_mutex_unlock(&mutex_atm_arrivals);
+        newArrive = (ptr_ll_wait_arrivals)malloc(sizeof(node_wait_queue_arrivals));
+        newArrive->slot = slot;
+        if(msg.msgtype == 1){
+          newArrive->urgent = 1;
+        }
+        else{
+          newArrive->urgent = 0;
+        }
+        newArrive->next= NULL;
+        newArrive->fuel = msg.fuel;
+        sem_wait(sem_shared_time_counter);
+        newArrive->eta = msg.eta+shared_memory->time_counter;
+        sem_post(sem_shared_time_counter);
+        pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
+        wait_queue_arrivals = sorted_insert_wait_queue_arrivals(wait_queue_arrivals,newArrive);
+        pthread_mutex_unlock(&mutex_ll_wait_arrivals_queue);
       }
-      newArrive->fuel = msg.fuel;
-      newArrive->next= NULL;
-      sem_wait(sem_shared_time_counter);
-      newArrive->eta = msg.eta+shared_memory->time_counter;
-      sem_post(sem_shared_time_counter);
-      pthread_mutex_lock(&mutex_ll_wait_arrivals_queue);
-      wait_queue_arrivals = sorted_insert_wait_queue_arrivals(wait_queue_arrivals,newArrive);
-      pthread_mutex_unlock(&mutex_ll_wait_arrivals_queue);
     }
     else if(msg.type == 'd'){
-      newDeparture = (ptr_ll_wait_departures)malloc(sizeof(node_wait_queue_departures));
-      newDeparture->slot = slot;
-      newDeparture->next = NULL;
-      sem_wait(sem_shared_time_counter);
-      newDeparture->takeoff = msg.takeoff+shared_memory->time_counter;
-      sem_post(sem_shared_time_counter);
-      pthread_mutex_lock(&mutex_ll_wait_departures_queue);
-      wait_queue_departures = sorted_insert_wait_queue_departures(wait_queue_departures,newDeparture);
-      pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
+      pthread_mutex_lock(&mutex_atm_departures);
+      if(options.max_takeoffs <= atm_departures){
+        pthread_mutex_unlock(&mutex_atm_departures);
+        sem_wait(sem_shared_flight_slots);
+        shared_memory->flight_slots[slot] = REJECTED;
+        sem_post(sem_shared_flight_slots);
+        sem_wait(sem_shared_stats);
+        shared_memory->stats.num_rejected++;
+        sem_post(sem_shared_stats);
+        sem_post(sem_cond);
+      }
+      else{
+        atm_departures++;
+        pthread_mutex_unlock(&mutex_atm_departures);
+        newDeparture = (ptr_ll_wait_departures)malloc(sizeof(node_wait_queue_departures));
+        newDeparture->slot = slot;
+        newDeparture->next = NULL;
+        sem_wait(sem_shared_time_counter);
+        newDeparture->takeoff = msg.takeoff+shared_memory->time_counter;
+        sem_post(sem_shared_time_counter);
+        pthread_mutex_lock(&mutex_ll_wait_departures_queue);
+        wait_queue_departures = sorted_insert_wait_queue_departures(wait_queue_departures,newDeparture);
+        pthread_mutex_unlock(&mutex_ll_wait_departures_queue);
+      }
     }
   }
 
@@ -1125,6 +1335,26 @@ void* departure_worker(void* ptr_ll_departure){
   type_rcv = shared_memory->stats.num_created_flights + 2;
   //SE CALHAR MUDAR AQUI O METODO
   sem_post(sem_shared_stats);
+
+  //VERIFICA SE PODE CRIAR
+  // pthread_mutex_lock(&mutex_atm_departures);
+  // if(options.max_takeoffs <= atm_departures){
+  //   sem_wait(sem_write_log);
+  //   log_fich = fopen(LOG_NAME,"a");
+  //   if(log_fich == NULL){
+  //     printf("Error opening %s", LOG_NAME);
+  //   }
+  //   //GET CURRENT TIME
+  //   get_current_time_to_string(time_string);
+  //   printf("%s %s REJECTED => MAX TAKEOFFS REACHED\n",flight_info.flight_code,time_string);
+  //   fprintf(log_fich,"%s %s REJECTED => MAX TAKEOFFS REACHED\n",flight_info.flight_code,time_string);
+  //   fclose(log_fich);
+  //   sem_post(sem_write_log);
+  //   pthread_mutex_unlock(&mutex_atm_departures);
+  //   pthread_exit(NULL);
+  // }
+  // atm_departures++;
+  // pthread_mutex_unlock(&mutex_atm_departures);
   //fill message queue message
   fill_message_departures(&msg,flight_info,type_rcv);
 
@@ -1145,35 +1375,104 @@ void* departure_worker(void* ptr_ll_departure){
   msgsnd(msq_id, &msg, sizeof(msg)-sizeof(long), 0);
 
   //wait for slot
-  printf("%d\n", type_rcv);
   msgrcv(msq_id,&msgSlot,sizeof(msgSlot)-sizeof(long),type_rcv,0);
   printf("PONTEIRO: %d CONTEUDO: %d\n",msgSlot.slot,shared_memory->flight_slots[msgSlot.slot] );
 
   pthread_mutex_lock(&mutex_cond);
   while(shared_memory->flight_slots[msgSlot.slot] == WAITING_ORDERS){
       pthread_cond_wait(&cond,&mutex_cond);
-      printf("O MEU SLOT TEM %d\n", shared_memory->flight_slots[msgSlot.slot]);
   }
   pthread_mutex_unlock(&mutex_cond);
-  usleep(options.ut * options.takeoff_dur);
 
-  sem_wait(sem_write_log);
-  log_fich = fopen(LOG_NAME,"a");
-  if(log_fich == NULL){
-    printf("Error opening %s", LOG_NAME);
+  sem_wait(sem_shared_flight_slots);
+  if(shared_memory->flight_slots[msgSlot.slot] == REJECTED){
+    shared_memory->flight_slots[msgSlot.slot] = UNUSED_SLOT;
+    sem_post(sem_shared_flight_slots);
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s REJECTED => MAX TAKEOFFS REACHED\n",time_string,flight_info.flight_code);
+    printf("%s %s REJECTED => MAX TAKEOFFS REACHED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+    pthread_exit(NULL);
   }
-  //GET CURRENT TIME
-  get_current_time_to_string(time_string);
-  fprintf(log_fich,"%s DEPARTURE %s CONCLUDED\n",time_string,flight_info.flight_code);
-  printf("DEPARTURE %s CONCLUDED\n",flight_info.flight_code);
-  fclose(log_fich);
-  sem_post(sem_write_log);
+  sem_post(sem_shared_flight_slots);
 
-  pthread_mutex_lock(&mutex_ll_threads);
-  thread_list = remove_thread_from_ll(thread_list,pthread_self());
-  free(ptr_ll_departure);
-  pthread_mutex_unlock(&mutex_ll_threads);
+  //ESCREVE QUE COMEÇOU
+  // printf("SAIUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU %d\n",shared_memory->flight_slots[msgSlot.slot]);
+  sem_wait(sem_shared_flight_slots);
+  if(shared_memory->flight_slots[msgSlot.slot] == GO_01L){
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s DEPARTURE 1L STARTED\n",time_string,flight_info.flight_code);
+    printf("%s %s DEPARTURE 1L STARTED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+  }
+  else if(shared_memory->flight_slots[msgSlot.slot] == GO_01R){
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s DEPARTURE 1R STARTED\n",time_string,flight_info.flight_code);
+    printf("%s %s DEPARTURE 1R STARTED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+  }
+  sem_post(sem_shared_flight_slots);
 
+  usleep(options.ut * options.takeoff_dur * 1000);
+
+  //ESCREVE QUE ACABOU
+  sem_wait(sem_shared_flight_slots);
+  if(shared_memory->flight_slots[msgSlot.slot] == GO_01L){
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s DEPARTURE 1L CONCLUDED\n",time_string,flight_info.flight_code);
+    printf("%s %s DEPARTURE 1L CONCLUDED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+  }
+  else if(shared_memory->flight_slots[msgSlot.slot] == GO_01R){
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s DEPARTURE 1R CONCLUDED\n",time_string,flight_info.flight_code);
+    printf("%s %s DEPARTURE 1R CONCLUDED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+  }
+  sem_post(sem_shared_flight_slots);
+
+  // pthread_mutex_lock(&mutex_ll_threads);
+  // thread_list = remove_thread_from_ll(thread_list,pthread_self());
+  // free(ptr_ll_departure);
+  // pthread_mutex_unlock(&mutex_ll_threads);
+  sem_wait(sem_shared_stats);
+  shared_memory->stats.num_takeoffs++;
+  sem_post(sem_shared_stats);
   pthread_exit(NULL);
 }
 
@@ -1188,6 +1487,26 @@ void* arrival_worker(void* ptr_ll_arrival){
   type_rcv = shared_memory->stats.num_created_flights + 2;
   //SE CALHAR MUDAR AQUI O METODO
   sem_post(sem_shared_stats);
+
+  //VERIFICA MAX
+  // pthread_mutex_lock(&mutex_atm_arrivals);
+  // if(options.max_takeoffs <= atm_arrivals){
+  //   sem_wait(sem_write_log);
+  //   log_fich = fopen(LOG_NAME,"a");
+  //   if(log_fich == NULL){
+  //     printf("Error opening %s", LOG_NAME);
+  //   }
+  //   //GET CURRENT TIME
+  //   get_current_time_to_string(time_string);
+  //   printf("%s %s REJECTED => MAX ARRIVALS REACHED\n",flight_info.flight_code,time_string);
+  //   fprintf(log_fich,"%s %s REJECTED => MAX ARRIVALS REACHED\n",flight_info.flight_code,time_string);
+  //   fclose(log_fich);
+  //   sem_post(sem_write_log);
+  //   pthread_mutex_unlock(&mutex_atm_arrivals);
+  //   pthread_exit(NULL);
+  // }
+  // atm_arrivals++;
+  // pthread_mutex_unlock(&mutex_atm_arrivals);
   //fill message queue message
   fill_message_arrivals(&msg,flight_info,type_rcv);
   sem_wait(sem_write_log);
@@ -1205,17 +1524,113 @@ void* arrival_worker(void* ptr_ll_arrival){
   //SEND MESSAGE
   msgsnd(msq_id, &msg, sizeof(msg)-sizeof(long), 0);
   //wait for slot
-  printf("%d\n", type_rcv);
   msgrcv(msq_id,&msgSlot,sizeof(msgSlot)-sizeof(long),type_rcv,0);
-  printf("PONTEIRO: %d CONTEUDO: %d\n",msgSlot.slot,shared_memory->flight_slots[msgSlot.slot] );
   // FALTA FAZER CONTROLO DE PISTAS
   pthread_mutex_lock(&mutex_cond);
   while(shared_memory->flight_slots[msgSlot.slot] == WAITING_ORDERS){
       pthread_cond_wait(&cond,&mutex_cond);
-      printf("O MEU SLOT TEM %d\n", shared_memory->flight_slots[msgSlot.slot]);
+      sem_wait(sem_shared_flight_slots);
+      if(shared_memory->flight_slots[msgSlot.slot] > 0){
+        sem_wait(sem_write_log);
+        log_fich = fopen(LOG_NAME,"a");
+        if(log_fich == NULL){
+          printf("Error opening %s", LOG_NAME);
+        }
+        //GET CURRENT TIME
+        get_current_time_to_string(time_string);
+        fprintf(log_fich,"%s ARRIVAL %s HOLDING %d\n",time_string,flight_info.flight_code,shared_memory->flight_slots[msgSlot.slot]);
+        printf("%s ARRIVAL %s HOLDING %d\n",time_string,flight_info.flight_code,shared_memory->flight_slots[msgSlot.slot]);
+        fclose(log_fich);
+        sem_post(sem_write_log);
+        shared_memory->flight_slots[msgSlot.slot] = WAITING_ORDERS;
+      }
+      else if(shared_memory->flight_slots[msgSlot.slot] == URGENT_REQUEST){
+        sem_wait(sem_write_log);
+        log_fich = fopen(LOG_NAME,"a");
+        if(log_fich == NULL){
+          printf("Error opening %s", LOG_NAME);
+        }
+        //GET CURRENT TIME
+        get_current_time_to_string(time_string);
+        fprintf(log_fich,"%s %s EMERGENCY LANDING REQUESTED\n",time_string,flight_info.flight_code);
+        printf("%s %s EMERGENCY LANDING REQUESTED\n",time_string,flight_info.flight_code);
+        fclose(log_fich);
+        sem_post(sem_write_log);
+        shared_memory->flight_slots[msgSlot.slot] = WAITING_ORDERS;
+      }
+      sem_post(sem_shared_flight_slots);
   }
   pthread_mutex_unlock(&mutex_cond);
-  usleep(options.ut * options.landing_dur);
+
+  //2 OPÇOES OU NAO TEM FUEL OU E PARA ATERRAR
+  sem_wait(sem_shared_flight_slots);
+  if(shared_memory->flight_slots[msgSlot.slot] == NO_FUEL){
+    shared_memory->flight_slots[msgSlot.slot] = UNUSED_SLOT;
+    sem_post(sem_shared_flight_slots);
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s LEAVING TO OTHER AIRPORT => FUEL = 0\n",time_string,flight_info.flight_code);
+    printf("%s %s LEAVING TO OTHER AIRPORT => FUEL = 0\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+    sem_wait(sem_shared_stats);
+    shared_memory->stats.redirected_flights++;
+    sem_post(sem_shared_stats);
+    pthread_exit(NULL);
+  }
+  else if(shared_memory->flight_slots[msgSlot.slot] == REJECTED){
+    shared_memory->flight_slots[msgSlot.slot] = UNUSED_SLOT;
+    sem_post(sem_shared_flight_slots);
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s REJECTED => MAX ARRIVALS REACHED\n",time_string,flight_info.flight_code);
+    printf("%s %s REJECTED => MAX ARRIVALS REACHED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+    pthread_exit(NULL);
+  }
+  sem_post(sem_shared_flight_slots);
+
+  sem_wait(sem_shared_flight_slots);
+  if(shared_memory->flight_slots[msgSlot.slot] == GO_28L){
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s ARRIVAL 28L STARTED\n",time_string,flight_info.flight_code);
+    printf("%s %s ARRIVAL 28L STARTED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+  }
+  else if(shared_memory->flight_slots[msgSlot.slot] == GO_28R){
+    sem_wait(sem_write_log);
+    log_fich = fopen(LOG_NAME,"a");
+    if(log_fich == NULL){
+      printf("Error opening %s", LOG_NAME);
+    }
+    //GET CURRENT TIME
+    get_current_time_to_string(time_string);
+    fprintf(log_fich,"%s %s ARRIVAL 28R STARTED\n",time_string,flight_info.flight_code);
+    printf("%s %s ARRIVAL 28R STARTED\n",time_string,flight_info.flight_code);
+    fclose(log_fich);
+    sem_post(sem_write_log);
+  }
+  sem_post(sem_shared_flight_slots);
+  //ESPERA PARA CONCLUIR ATERRAGEM
+  usleep(options.ut * options.landing_dur * 1000);
 
   sem_wait(sem_write_log);
   log_fich = fopen(LOG_NAME,"a");
@@ -1228,11 +1643,19 @@ void* arrival_worker(void* ptr_ll_arrival){
   printf("ARRIVAL %s CONCLUDED\n",flight_info.flight_code);
   fclose(log_fich);
   sem_post(sem_write_log);
-  pthread_mutex_lock(&mutex_ll_threads);
-  thread_list = remove_thread_from_ll(thread_list,pthread_self());
-  free(ptr_ll_arrival);
-  pthread_mutex_unlock(&mutex_ll_threads);
 
+  // //ELEMINA THREAD DA THREADS LL
+  // pthread_mutex_lock(&mutex_ll_threads);
+  // thread_list = remove_thread_from_ll(thread_list,pthread_self());
+  // free(ptr_ll_arrival);
+  // pthread_mutex_unlock(&mutex_ll_threads);
+
+  sem_wait(sem_shared_flight_slots);
+  shared_memory->flight_slots[msgSlot.slot] = UNUSED_SLOT;
+  sem_post(sem_shared_flight_slots);
+  sem_wait(sem_shared_stats);
+  shared_memory->stats.num_landed++;
+  sem_post(sem_shared_stats);
   pthread_exit(NULL);
 }
 
@@ -1266,7 +1689,7 @@ void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int 
   msg->eta = flight_info.eta;
   msg->takeoff = -1;
   msg->type_rcv = type_rcv;
-  if(msg->fuel == msg->eta + options.landing_dur +4){
+  if(msg->fuel <= msg->eta + options.landing_dur +4){
     msg->msgtype = 1;
   }
   else{
@@ -1295,10 +1718,20 @@ void* notify_worker(){
   }
 }
 
+void zero_runways(){
+  for(int l = 0;l<2;l++){
+    for(int c = 0;c<4;c++){
+      runways[l][c] = 0;
+    }
+  }
+}
+
 void cleanup(){
   //CLEAN SHARED MEMORY
   shmdt(shared_memory);
 	shmctl(shmid, IPC_RMID,NULL);
+
+  kill (pid_ct, SIGKILL);
   //DESTROY SEMAPHROE
   sem_destroy(sem_write_log);
   sem_destroy(sem_shared_stats);
@@ -1307,4 +1740,20 @@ void cleanup(){
   pthread_mutex_destroy(&mutex_ll_create_departures);
   //CLEAN MSG QUEUE
   msgctl(msq_id, IPC_RMID, NULL);
+
+}
+
+void sigusr1_handler(int signal){
+  sem_wait(sem_shared_stats);
+  printf("\n\t\t\t[Statistics]\n\n");
+  printf("Número total de voos criados: %d\n", shared_memory->stats.num_created_flights);
+  printf("Número total de voos que aterraram: %d\n", shared_memory->stats.num_landed);
+  printf("Tempo média de espera (para além do ETA) para aterrar: %d\n", shared_memory->stats.avg_wait_land_time);
+  printf("Número total de voos que descolaram: %d\n", shared_memory->stats.num_takeoffs);
+  printf("Tempo médio de espera para descolar: %d\n", shared_memory->stats.avg_wait_takeoff_time);
+  printf("Número médio de manobras de holding por voo de aterragem: %d\n", shared_memory->stats.avg_holdings);
+  printf("Número médio de manobras de holding por voo em estado de urgência: %d\n", shared_memory->stats.avg_emergency_holdings);
+  printf("Número de voos redirecionados para outro aeroporto: %d\n", shared_memory->stats.redirected_flights);
+  printf("Voos rejeitados pela Torre de Controlo: %d\n", shared_memory->stats.num_rejected);
+  sem_post(sem_shared_stats);
 }
