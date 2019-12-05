@@ -32,6 +32,16 @@
 #define GO_01R -6 //DESCOLAGEM
 #define REJECTED -7
 #define URGENT_REQUEST -8
+#define SEM_LOG "SEM_LOG"
+#define SEM_SHARED_STATS "SEM_SHARED_STATS"
+#define SEM_SHARED_FLIGHT_SLOTS "SEM_SHARED_FLIGHT_SLOT"
+#define SEM_TIME_COUNTER "SEM_TIME_COUNTER"
+#define SEM_RUNWAY "SEM_RUNWAY"
+#define SEM_GO_TIME_SM "SEM_GO_TIME_SM"
+#define SEM_GO_TIME_CT "SEM_GO_TIME_CT"
+#define SEM_COND "SEM_COND"
+#define SEM_CTRL_C "SEM_CTRL_C"
+
 //HOLDING PARA TODOS OS VALORES > 0
 
 //HEADER FILE
@@ -47,25 +57,26 @@ typedef struct config_options {
 typedef struct stats{
   int num_created_flights;
   int num_landed;
-  int avg_wait_land_time; //TODO:
+  float avg_wait_land_time; //TODO:
   int num_takeoffs;
-  int avg_wait_takeoff_time; //TODO:
-  int avg_holdings; //TODO:
-  int avg_emergency_holdings; //TODO:
+  float avg_wait_takeoff_time; //TODO:
+  float avg_holdings; //TODO:
+  float avg_emergency_holdings; //TODO:
   int redirected_flights;
   int num_rejected;
 }Stats;
 
 typedef struct{
   Stats stats;
-  int flight_slots[100];
-  //PROBLEMA: RESOLVER ISTO
+  int* flight_slots;
   int time_counter;
+  int ctrl_c;
   // int runway[2][4];
   /* ____________________________
-    | P1 | P2 | TIMEP1 | TIMEP2 | ARRIVALS -> If(P1 && !TIMEP1{VOO a acontecer em p1} If(!p1 && !TimeP2){Segurança}
+    | P1 | P2 | TIMEP1 | TIMEP2 | ARRIVALS -> If(P1 && !TIMEP1{VOO a acontecer em p1} If(!p1 && TimeP1){Segurança}
     | P3 | P4 | TIMEP3 | TIMEP4 | DEPARTURES
     _____________________________ */
+
 } mem_structure;
 mem_structure* shared_memory;
 
@@ -151,6 +162,7 @@ void zero_runways();
 void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int type_rcv);
 void fill_message_departures(message* msg, Ll_departures_to_create flight_info,int type_rcv);
 void sigusr1_handler(int signal);
+void destroy_everything();
 //CONTROL tower
 void* time_worker_ct();
 void* manage_worker();
@@ -175,6 +187,7 @@ ptr_ll_wait_departures departure_queue = NULL;
 int shmid;
 int fd;
 int msq_id;
+int shmidSLOTS;
 // 1 FOR URGENT
 // 2 FOR SEND TO CONTROL TOWER
 // 3+ for send to each flight
@@ -184,6 +197,8 @@ int atm_arrivals = 0;
 FILE* log_fich;
 int runways[2][4];
 struct sigaction sigusr1;
+int n_urgent_created = 0;
+int n_arrivals_created = 0;
 // semaphores
 sem_t* sem_write_log;
 sem_t* sem_shared_stats;
@@ -202,8 +217,11 @@ pthread_mutex_t mutex_ll_create_arrivals = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_atm_departures = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_atm_arrivals = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_cond = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_cond_cleanup = PTHREAD_MUTEX_INITIALIZER;//FALTA DESTRUIR
+pthread_mutex_t mutex_arrivals_created = PTHREAD_MUTEX_INITIALIZER;
 //PARA CT
 pthread_mutex_t mutex_ll_wait_departures_queue = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_wait_arrivals_queue = PTHREAD_MUTEX_INITIALIZER;
 // cond variables
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t cond_cleanup = PTHREAD_COND_INITIALIZER;
