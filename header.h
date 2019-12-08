@@ -162,6 +162,7 @@ void zero_runways();
 void fill_message_arrivals(message* msg, Ll_arrivals_to_create flight_info, int type_rcv);
 void fill_message_departures(message* msg, Ll_departures_to_create flight_info,int type_rcv);
 void sigusr1_handler(int signal);
+void sigint_handler(int signal);
 void destroy_everything();
 //CONTROL tower
 void* time_worker_ct();
@@ -196,7 +197,7 @@ int atm_departures = 0;
 int atm_arrivals = 0;
 FILE* log_fich;
 int runways[2][4];
-struct sigaction sigusr1;
+struct sigaction sa;
 int n_urgent_created = 0;
 int n_arrivals_created = 0;
 // semaphores

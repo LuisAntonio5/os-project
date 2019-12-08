@@ -8,7 +8,7 @@
 
 // FIM HEADER
 
-void sigint(int num){
+void sigint_handler(int signal){
   #ifdef DEBUG
   ptr_ll_departures_to_create aux = departures_list;
   while (aux != NULL) {
@@ -33,15 +33,14 @@ void sigint(int num){
 int main(void){
   read_config(&options);
 
-  sigusr1.sa_flags = 0;
-  sigusr1.sa_handler = sigusr1_handler;
-  if(sigemptyset(&sigusr1.sa_mask) == -1){
+  sa.sa_flags = 0;
+  if(sigemptyset(&sa.sa_mask) == -1){
     destroy_everything();
   }
-  if(sigfillset(&sigusr1.sa_mask) == -1){
+  if(sigfillset(&sa.sa_mask) == -1){
     destroy_everything();
   }
-  if(sigprocmask(SIG_BLOCK, &sigusr1.sa_mask, NULL) == -1){
+  if(sigprocmask(SIG_BLOCK, &sa.sa_mask, NULL) == -1){
     destroy_everything();
   }
 
@@ -148,17 +147,6 @@ int main(void){
     sim_manager();
   }
 
-  // //sigaction
-  // pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL);
-  // sigusr1.sa_flags = 0;
-  // sigusr1.sa_handler = sigusr1_handler;
-  // sigemptyset(&sigusr1.sa_mask);
-  // sigfillset(&sigusr1.sa_mask);
-  // sigdelset(&sigusr1.sa_mask, SIGINT);
-  // pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL);
-  //
-  // signal(SIGINT,sigint);
-  // pause();
   return 0;
 }
 
@@ -203,25 +191,30 @@ void sim_manager(){
   // // fix este join, funciona só para nao acabar o programa
   // pthread_join(new_thread,NULL);
 
-  //sigaction
-  if(pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL)== -1){
+  //accept sigint and block others
+  if(pthread_sigmask(SIG_UNBLOCK, &sa.sa_mask, NULL)== -1){
     destroy_everything();
   }
 
-  if(sigemptyset(&sigusr1.sa_mask) == -1){
+  sa.sa_flags = 0;
+  sa.sa_handler = sigint_handler;
+
+  if(sigemptyset(&sa.sa_mask) == -1){
     destroy_everything();
   }
-  if(sigfillset(&sigusr1.sa_mask) == -1){
+  if(sigfillset(&sa.sa_mask) == -1){
     destroy_everything();
   }
-  if(sigdelset(&sigusr1.sa_mask, SIGINT)== -1){
+  if(sigdelset(&sa.sa_mask, SIGINT)== -1){
     destroy_everything();
   }
-  if(pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL)== -1){
+  if(pthread_sigmask(SIG_BLOCK, &sa.sa_mask, NULL)== -1){
     destroy_everything();
   }
 
-  signal(SIGINT,sigint);
+  if(sigaction(SIGINT, &sa, NULL) == -1){
+    destroy_everything();
+  }
   pause();
 }
 
@@ -654,27 +647,27 @@ void control_tower(){
   if(pthread_mutex_unlock(&mutex_ll_threads) != 0)
     destroy_everything();
 
-  //sigaction
-  if(pthread_sigmask(SIG_UNBLOCK, &sigusr1.sa_mask, NULL) == -1){
+  //accept sigusr1 and block others
+  if(pthread_sigmask(SIG_UNBLOCK, &sa.sa_mask, NULL) == -1){
     destroy_everything();
   }
-  sigusr1.sa_flags = 0;
-  sigusr1.sa_handler = sigusr1_handler;
-  if(sigemptyset(&sigusr1.sa_mask) == -1){
+  sa.sa_flags = 0;
+  sa.sa_handler = sigusr1_handler;
+  if(sigemptyset(&sa.sa_mask) == -1){
     destroy_everything();
   }
-  if(sigfillset(&sigusr1.sa_mask) == -1){
+  if(sigfillset(&sa.sa_mask) == -1){
     destroy_everything();
   }
-  if(sigdelset(&sigusr1.sa_mask, SIGUSR1) == -1){
+  if(sigdelset(&sa.sa_mask, SIGUSR1) == -1){
     destroy_everything();
   }
-  if(pthread_sigmask(SIG_BLOCK, &sigusr1.sa_mask, NULL) == -1){
+  if(pthread_sigmask(SIG_BLOCK, &sa.sa_mask, NULL) == -1){
     destroy_everything();
   }
 
   while (1) {
-    if(sigaction(SIGUSR1, &sigusr1, NULL) == -1){
+    if(sigaction(SIGUSR1, &sa, NULL) == -1){
       destroy_everything();
     }
     pause();
@@ -2217,7 +2210,10 @@ void cleanup(){
   //CLEAN SHARED MEMORY
   ptr_ll_threads aux_join;
   printf("\nSHUTING DOWN SERVICES...\n");
-  signal (SIGINT, SIG_IGN);
+
+  //block sigint
+  signal(SIGINT, SIG_IGN);
+
   if(sem_wait(sem_shared_crtl_c) == -1)
     destroy_everything();
   shared_memory->ctrl_c=1;
