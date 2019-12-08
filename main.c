@@ -277,8 +277,9 @@ void *pipe_worker(){
       }
     }
     else{
-      if(sem_wait(sem_shared_crtl_c) == -1)
+      if(sem_post(sem_shared_crtl_c) == -1)
         destroy_everything();
+      pthread_exit(NULL);
     }
   }
 }
@@ -741,7 +742,6 @@ void* time_worker_ct(){
       current_arrival_queue = current_arrival_queue->next;
     }
 
-    //TODO: SEMAFORO DESTAs LISTAs LIGADAs
     //CHEGADAS
     if(pthread_mutex_lock(&mutex_ll_wait_arrivals_queue) != 0){
       destroy_everything();
@@ -752,7 +752,6 @@ void* time_worker_ct(){
         #ifdef DEBUG
         printf("Slot: %d Sem FUEL\n",current_wait_arrivals->slot);
         #endif
-        //TODO: ENVIAR O VOO PARA O CARALHO
         if(sem_wait(sem_shared_flight_slots) == -1){
           destroy_everything();
         }
@@ -1631,7 +1630,8 @@ void* departure_worker(void* ptr_ll_departure){
   if(msgrcv(msq_id,&msgSlot,sizeof(msgSlot)-sizeof(long),type_rcv,0) == -1){
     destroy_everything();
   }
-  printf("PONTEIRO: %d CONTEUDO: %d\n",msgSlot.slot,shared_memory->flight_slots[msgSlot.slot] );
+
+  // printf("PONTEIRO: %d CONTEUDO: %d\n",msgSlot.slot,shared_memory->flight_slots[msgSlot.slot] );
 
   if(pthread_mutex_lock(&mutex_cond) != 0){
     destroy_everything();
@@ -1774,6 +1774,7 @@ void* departure_worker(void* ptr_ll_departure){
       destroy_everything();
     }
   }
+  shared_memory->flight_slots[msgSlot.slot] = UNUSED_SLOT;
   if(sem_post(sem_shared_flight_slots) == -1){
     destroy_everything();
   }
@@ -1862,6 +1863,7 @@ void* arrival_worker(void* ptr_ll_arrival){
   if(msg.msgtype == 1)
     n_urgent_created++;
   n_arrivals_created++;
+  printf("%d\n", n_arrivals_created);
   if(pthread_mutex_unlock(&mutex_arrivals_created) != 0){
     destroy_everything();
   }
@@ -1914,13 +1916,13 @@ void* arrival_worker(void* ptr_ll_arrival){
         //RESET NO WAIT TIME => VOLTA A TER ETA
         if(msg.msgtype == 1){
           sem_wait(sem_shared_stats);
-          shared_memory->stats.avg_holdings++;
-          shared_memory->stats.avg_emergency_holdings++;
+          shared_memory->stats.avg_holdings = (shared_memory->stats.avg_holdings*n_arrivals_created+1)/n_arrivals_created;
+          shared_memory->stats.avg_emergency_holdings = (shared_memory->stats.avg_emergency_holdings*n_urgent_created+1)/n_urgent_created;
           sem_post(sem_shared_stats);
         }
         else{
           sem_wait(sem_shared_stats);
-          shared_memory->stats.avg_holdings++;
+          shared_memory->stats.avg_holdings = (shared_memory->stats.avg_holdings*n_arrivals_created+1)/n_arrivals_created;
           sem_post(sem_shared_stats);
         }
         shared_memory->flight_slots[msgSlot.slot] = WAITING_ORDERS;
@@ -2215,6 +2217,7 @@ void cleanup(){
   //CLEAN SHARED MEMORY
   ptr_ll_threads aux_join;
   printf("\nSHUTING DOWN SERVICES...\n");
+  signal (SIGINT, SIG_IGN);
   if(sem_wait(sem_shared_crtl_c) == -1)
     destroy_everything();
   shared_memory->ctrl_c=1;
@@ -2327,22 +2330,24 @@ void sigusr1_handler(int signal){
   printf("Tempo média de espera (para além do ETA) para aterrar: %0.2f\n", shared_memory->stats.avg_wait_land_time);
   printf("Número total de voos que descolaram: %d\n", shared_memory->stats.num_takeoffs);
   printf("Tempo médio de espera para descolar: %0.2f\n", shared_memory->stats.avg_wait_takeoff_time);
-  if(pthread_mutex_lock(&mutex_arrivals_created) != 0)
-    destroy_everything();
-  if(!n_arrivals_created){
-    printf("Número médio de manobras de holding por voo de aterragem: 0\n");
-  }
-  else{
-    printf("Número médio de manobras de holding por voo de aterragem: %f\n", shared_memory->stats.avg_holdings/n_arrivals_created);
-  }
-  if(!n_urgent_created){
-    printf("Número médio de manobras de holding por voo em estado de urgência: 0\n");
-  }
-  else{
-    printf("Número médio de manobras de holding por voo em estado de urgência: %0.2f\n", shared_memory->stats.avg_emergency_holdings/n_urgent_created);
-  }
-  if(pthread_mutex_unlock(&mutex_arrivals_created) != 0)
-    destroy_everything();
+  // if(pthread_mutex_lock(&mutex_arrivals_created) != 0)
+  //   destroy_everything();
+  // printf("%d\n", n_arrivals_created);
+  // if(!n_arrivals_created){
+  //   printf("Número médio de manobras de holding por voo de aterragem: 0\n");
+  // }
+  // else{
+  // printf("%f\n", shared_memory->stats.avg_holdings);
+  printf("Número médio de manobras de holding por voo de aterragem: %f\n", shared_memory->stats.avg_holdings);
+  // }
+  // if(!n_urgent_created){
+  //   printf("Número médio de manobras de holding por voo em estado de urgência: 0\n");
+  // }
+  // else{
+  printf("Número médio de manobras de holding por voo em estado de urgência: %0.2f\n", shared_memory->stats.avg_emergency_holdings);
+  // }
+  // if(pthread_mutex_unlock(&mutex_arrivals_created) != 0)
+  //   destroy_everything();
   printf("Número de voos redirecionados para outro aeroporto: %d\n", shared_memory->stats.redirected_flights);
   printf("Voos rejeitados pela Torre de Controlo: %d\n", shared_memory->stats.num_rejected);
   if(sem_post(sem_shared_stats) == -1){
